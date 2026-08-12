@@ -18,8 +18,6 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from discord.ext import tasks
 
-#test
-
 # ---------- НАЛАШТУВАННЯ ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID")) if os.getenv("CHANNEL_ID") else 0
