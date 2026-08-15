@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from discord.ext import tasks
 
-# ---------- РќРђР›РђРЁРўРЈР’РђРќРќРЇ ----------
+# ---------- НАЛАШТУВАННЯ ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID")) if os.getenv("CHANNEL_ID") else 0
 NEWSKY_API_KEY = os.getenv("NEWSKY_API_KEY")
@@ -28,7 +28,7 @@ NEWSKY_SID = os.getenv("NEWSKY_SID")
 GITHUB_REPO = "kazuar-avia/kazuar-avia.github.io"
 GITHUB_FILE_PATH = "newsky-airports.txt"
 
-# Р¤РѕСЂРјСѓС”РјРѕ СЃРїРёСЃРѕРє РєР»СЋС‡С–РІ (РїРµСЂС€РёРј Р·Р°РІР¶РґРё Р№РґРµ РіРѕР»РѕРІРЅРёР№!)
+# Формуємо список ключів (першим завжди йде головний!)
 NEWSKY_API_KEYS = []
 if NEWSKY_API_KEY: 
     NEWSKY_API_KEYS.append(NEWSKY_API_KEY)
@@ -66,7 +66,7 @@ LAST_TRAFFIC_TIME = 0.0
 TAXIING_FLIGHTS = set()
 last_sent_message = None
 
-# ---------- Р”РћРџРћРњР†Р–РќР† Р¤РЈРќРљР¦Р†Р‡ ----------
+# ---------- ДОПОМІЖНІ ФУНКЦІЇ ----------
 def format_flight_for_db(f):
     correctAircraftName = None
     if f.get("aircraft") and f["aircraft"].get("airframe") and f["aircraft"]["airframe"].get("name"):
@@ -154,7 +154,7 @@ def format_flight_for_db(f):
                         "rate": p["touchDown"].get("rate")
                     }
                 
-                # рџ”Ґ РќРћР’Р•: Р—Р‘Р•Р Р†Р“РђР„РњРћ РџРћР“РћР”РЈ (Р’Р†РўР•Р ) РџР†Р” Р§РђРЎ РџРћРЎРђР”РљР рџ”Ґ
+                # 🔥 НОВЕ: ЗБЕРІГАЄМО ПОГОДУ (ВІТЕР) ПІД ЧАС ПОСАДКИ 🔥
                 if p.get("weather"):
                     w = p["weather"]
                     cleanV["entry"]["payload"]["weather"] = {
@@ -165,7 +165,7 @@ def format_flight_for_db(f):
 
             cleanFlight["result"]["violations"].append(cleanV)
             
-    # рџ”Ґ РќРћР’Р•: Р Р•Р—Р•Р Р’РќР• Р—Р‘Р•Р Р•Р–Р•РќРќРЇ РџРћРЎРђР”РљР (СЏРєС‰Рѕ РЅРµ Р±СѓР»Рѕ РїРѕСЂСѓС€РµРЅСЊ) рџ”Ґ
+    # 🔥 НОВЕ: РЕЗЕРВНЕ ЗБЕРЕЖЕННЯ ПОСАДКИ (якщо не було порушень) 🔥
     if f.get("landing"):
         cleanFlight["landing"] = {
             "rate": f["landing"].get("rate") or f["landing"].get("touchDownRate"),
@@ -184,7 +184,7 @@ def format_flight_for_db(f):
 async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
     if not NEWSKY_SID or not GITHUB_TOKEN: return None
     
-    # 1. Р—Р°РїРёС‚ РґРѕ Newsky (СЃРїРёСЃРѕРє РІСЃС–С… Р±РѕСЂС‚С–РІ РєРѕРјРїР°РЅС–С—)
+    # 1. Запит до Newsky (список всіх бортів компанії)
     ns_headers = {
         "User-Agent": "Mozilla/5.0",
         "Cookie": f"sid={NEWSKY_SID}" if not NEWSKY_SID.startswith("sid=") else NEWSKY_SID,
@@ -207,7 +207,7 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
         print(f"Error fetching aircraft list: {e}")
         pass
     
-    # 2. Р§РёС‚Р°РЅРЅСЏ livery-matching.json С‡РµСЂРµР· Blob API (РњРёС‚С‚С”РІРѕ, 100% Р±РµР· РєРµС€Сѓ)
+    # 2. Читання livery-matching.json через Blob API (Миттєво, 100% без кешу)
     gh_headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -216,7 +216,7 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
     livery_data = None
     
     try:
-        # РЁСѓРєР°С”РјРѕ SHA С„Р°Р№Р»Сѓ РІ РїР°РїС†С– COMPANY (Р· Р°РЅС‚РёРєРµС€-С‚Р°Р№РјРµСЂРѕРј)
+        # Шукаємо SHA файлу в папці COMPANY (з антикеш-таймером)
         dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/COMPANY?t={int(time.time())}"
         file_sha = None
         
@@ -227,7 +227,7 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
                         file_sha = item.get("sha")
                         break
                         
-        # РЇРєС‰Рѕ Р·РЅР°Р№С€Р»Рё SHA, РІРёРєР°С‡СѓС”РјРѕ "Рј'СЏСЃРѕ" С„Р°Р№Р»Сѓ РЅР°РїСЂСЏРјСѓ
+        # Якщо знайшли SHA, викачуємо "м'ясо" файлу напряму
         if file_sha:
             blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{file_sha}"
             async with session.get(blob_url, headers=gh_headers) as blob_resp:
@@ -235,40 +235,40 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
                     blob_data = await blob_resp.json()
                     livery_data = json.loads(base64.b64decode(blob_data['content']).decode('utf-8'))
     except Exception as e:
-        print(f"РџРѕРјРёР»РєР° С‡РёС‚Р°РЅРЅСЏ livery: {e}")
+        print(f"Помилка читання livery: {e}")
         return None
         
     if not livery_data: return None
     
-    # 3. Рњ'СЏСЃРѕСЂСѓР±РєР°: РѕРЅРѕРІР»СЋС”РјРѕ Р»РѕРєР°С†С–С—
+    # 3. М'ясорубка: оновлюємо локації
     for ac in livery_data.get("liveries", []):
         ac_id = str(ac.get("_id"))
         
-        # Рђ) РћРЅРѕРІР»СЋС”РјРѕ Р·Р°РіР°Р»СЊРЅСѓ Р»РѕРєР°С†С–СЋ С‚Р° РЅР°Р·РІСѓ Р· Newsky (СЏРєС‰Рѕ Р±РѕСЂС‚ С” Сѓ СЃРїРёСЃРєСѓ)
+        # А) Оновлюємо загальну локацію та назву з Newsky (якщо борт є у списку)
         if ac_id in ns_aircraft:
             ac["locationIcao"] = ns_aircraft[ac_id].get("locationIcao")
             if ns_aircraft[ac_id].get("name"):
                 ac["name"] = ns_aircraft[ac_id].get("name")
             
-        # Р‘) РћРЅРѕРІР»СЋС”РјРѕ lastflightlocationICAO РўР†Р›Р¬РљР РґР»СЏ Р»С–С‚Р°РєР°, С‰Рѕ С‰РѕР№РЅРѕ СЃС–РІ (Р·Р°РјС–РЅСЋСЋС‡Рё Р»РѕРіС–РєСѓ Newsky)
+        # Б) Оновлюємо lastflightlocationICAO ТІЛЬКИ для літака, що щойно сів (замінюючи логіку Newsky)
         if ac_id == str(target_ac_id) and actual_arr_icao:
             ac["lastflightlocationICAO"] = actual_arr_icao
             
-    # 4. РћРЅРѕРІР»СЋС”РјРѕ С‡Р°СЃ РіРµРЅРµСЂР°С†С–С—
+    # 4. Оновлюємо час генерації
     livery_data["generatedAtUtc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     
-    # РџРѕРІРµСЂС‚Р°С”РјРѕ РіРѕС‚РѕРІРёР№ С‚РµРєСЃС‚ РґР»СЏ Р·Р°РїРёСЃСѓ
+    # Повертаємо готовий текст для запису
     return json.dumps(livery_data, ensure_ascii=False, indent=2)
     
 async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, week_tag):
     if not GITHUB_TOKEN:
-        print("вљ пёЏ РќРµРјР°С” С‚РѕРєРµРЅСѓ GitHub, СЂРµР№СЃ РЅРµ Р·Р±РµСЂРµР¶РµРЅРѕ РІ Р‘Р”.")
+        print("⚠️ Немає токену GitHub, рейс не збережено в БД.")
         return
         
     week_filename = f"{week_tag}.json"
     file_path = f"FLIGHTS/{week_filename}"
     
-    # рџ”Ґ Р”РѕРґР°РЅРѕ Р°РЅС‚РёРєРµС€ Р·Р°РіРѕР»РѕРІРѕРє
+    # 🔥 Додано антикеш заголовок
     gh_headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -277,7 +277,7 @@ async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar
     
     async with GITHUB_DB_LOCK:
         async with aiohttp.ClientSession() as session:
-            # 1. РЁРЈРљРђР„РњРћ SHA Р¤РђР™Р›РЈ (РґРѕРґР°РЅРѕ ?t=... РґР»СЏ РѕР±С…РѕРґСѓ РєРµС€Сѓ GitHub)
+            # 1. ШУКАЄМО SHA ФАЙЛУ (додано ?t=... для обходу кешу GitHub)
             file_sha = None
             dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/FLIGHTS?t={int(time.time())}"
             async with session.get(dir_url, headers=gh_headers) as dir_resp:
@@ -289,7 +289,7 @@ async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar
                                 file_sha = item.get("sha")
                                 break
             
-            # 2. РљРђР§РђР„РњРћ Р’РњР†РЎРў РќРђРџР РЇРњРЈ Р— BLOB API (РњРёС‚С‚С”РІРѕ, Р±РµР· РєРµС€Сѓ!)
+            # 2. КАЧАЄМО ВМІСТ НАПРЯМУ З BLOB API (Миттєво, без кешу!)
             github_file_content = []
             if file_sha:
                 blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{file_sha}"
@@ -300,27 +300,27 @@ async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar
                             text_content = base64.b64decode(blob_data['content']).decode('utf-8')
                             github_file_content = json.loads(text_content)
                         except Exception as e:
-                            print(f"РџРѕРјРёР»РєР° С‡РёС‚Р°РЅРЅСЏ Blob: {e}")
+                            print(f"Помилка читання Blob: {e}")
                             github_file_content = []
             
-            # 3. РЎРћР РўРЈР’РђРќРќРЇ Р† Р”РћР”РђР’РђРќРќРЇ Р Р•Р™РЎРЈ РџРћ РџР†Р›РћРўРђРҐ
+            # 3. СОРТУВАННЯ І ДОДАВАННЯ РЕЙСУ ПО ПІЛОТАХ
             existing_pilot = next((p for p in github_file_content if p.get("pilot_id") == pilot_id), None)
             
-            profile_changed = False # рџ”Ґ Р¤Р»Р°Рі РґР»СЏ Р·Р°РїСѓСЃРєСѓ РјР°СЃРѕРІРѕРіРѕ РѕРЅРѕРІР»РµРЅРЅСЏ
+            profile_changed = False # 🔥 Флаг для запуску масового оновлення
             
             if existing_pilot:
-                # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё Р·РјС–РЅРёР»Р°СЃСЏ Р°РІР°С‚Р°СЂРєР° Р°Р±Рѕ С–Рј'СЏ РїРѕСЂС–РІРЅСЏРЅРѕ Р· Р±Р°Р·РѕСЋ
+                # Перевіряємо, чи змінилася аватарка або ім'я порівняно з базою
                 if existing_pilot.get("avatar") != pilot_avatar or existing_pilot.get("fullname") != pilot_name:
-                    print(f"вљ пёЏ Р’РёСЏРІР»РµРЅРѕ Р·РјС–РЅСѓ РїСЂРѕС„С–Р»СЋ РґР»СЏ {pilot_name}. Р—Р°РїСѓСЃРєР°СЋ С„РѕРЅРѕРІРµ РѕРЅРѕРІР»РµРЅРЅСЏ Р±Р°Р·Рё...")
+                    print(f"⚠️ Виявлено зміну профілю для {pilot_name}. Запускаю фонове оновлення бази...")
                     existing_pilot["fullname"] = pilot_name
                     existing_pilot["avatar"] = pilot_avatar
-                    profile_changed = True # Р’РјРёРєР°С”РјРѕ С‚СЂРёРіРµСЂ!
+                    profile_changed = True # Вмикаємо тригер!
 
-                # РџРµСЂРµРІС–СЂРєР°, С‰РѕР± РІРёРїР°РґРєРѕРІРѕ РЅРµ РґРѕРґР°С‚Рё С‚РѕР№ СЃР°РјРёР№ СЂРµР№СЃ РґРІС–С‡С–
+                # Перевірка, щоб випадково не додати той самий рейс двічі
                 if not any(f.get("_id") == clean_flight["_id"] for f in existing_pilot["flights"]):
                     existing_pilot["flights"].append(clean_flight)
             else:
-                # РЇРєС‰Рѕ РїС–Р»РѕС‚ Р»РµС‚РёС‚СЊ РІРїРµСЂС€Рµ РЅР° С†СЊРѕРјСѓ С‚РёР¶РЅС– - СЃС‚РІРѕСЂСЋС”РјРѕ Р№РѕРіРѕ Р±Р»РѕРє
+                # Якщо пілот летить вперше на цьому тижні - створюємо його блок
                 new_pilot_block = {
                     "pilot_id": pilot_id,
                     "fullname": pilot_name,
@@ -329,15 +329,15 @@ async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar
                 }
                 github_file_content.append(new_pilot_block)
             
-            # 4. Р’Р†Р”РџР РђР’РљРђ РќРђ GITHUB (РћР”РќРРњ РљРћРњР†РўРћРњ Р РђР—РћРњ Р†Р— LIVERY-MATCHING)
+            # 4. ВІДПРАВКА НА GITHUB (ОДНИМ КОМІТОМ РАЗОМ ІЗ LIVERY-MATCHING)
             new_content_str = json.dumps(github_file_content, ensure_ascii=False, indent=4)
             
-            # Р—Р±РёСЂР°С”РјРѕ С„Р°Р№Р»Рё РґР»СЏ РІС–РґРїСЂР°РІРєРё
+            # Збираємо файли для відправки
             files_to_push = {
                 file_path: new_content_str
             }
             
-            # Р”С–СЃС‚Р°С”РјРѕ ID Р»С–С‚Р°РєР° С‚Р° С„Р°РєС‚РёС‡РЅРёР№ Р°РµСЂРѕРїРѕСЂС‚ РїСЂРёР±СѓС‚С‚СЏ Р· С‡РёСЃС‚РёС… РґР°РЅРёС… СЂРµР№СЃСѓ
+            # Дістаємо ID літака та фактичний аеропорт прибуття з чистих даних рейсу
             ac_id = clean_flight.get("aircraft", {}).get("_id")
             act_arr = clean_flight.get("actArr")
             arr = clean_flight.get("arr")
@@ -348,21 +348,21 @@ async def save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar
             elif isinstance(arr, dict) and arr.get("icao"):
                 actual_arr_icao = arr.get("icao")
                 
-            # Р“РµРЅРµСЂСѓС”РјРѕ РѕРЅРѕРІР»РµРЅРёР№ livery-matching.json С– РґРѕРґР°С”РјРѕ РґРѕ СЃРїРёСЃРєСѓ С„Р°Р№Р»С–РІ РЅР° РІС–РґРїСЂР°РІРєСѓ
+            # Генеруємо оновлений livery-matching.json і додаємо до списку файлів на відправку
             if ac_id:
                 livery_content = await get_updated_liveries_content(session, ac_id, actual_arr_icao)
                 if livery_content:
                     files_to_push["COMPANY/livery-matching.json"] = livery_content
                     
-            commit_msg = f"рџ¤– Auto db update: flight {clean_flight.get('flightNumber')} & Fleet Loc"
+            commit_msg = f"🤖 Auto db update: flight {clean_flight.get('flightNumber')} & Fleet Loc"
             
-            # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ С”РґРёРЅРёРј РїСѓС€РµРј С‡РµСЂРµР· РІР°С€Сѓ РіРѕС‚РѕРІСѓ С„СѓРЅРєС†С–СЋ push_to_github_batch
+            # Відправляємо єдиним пушем через вашу готову функцію push_to_github_batch
             success = await push_to_github_batch(session, files_to_push, commit_msg)
             
             if not success:
-                print(f"вќЊ РџРѕРјРёР»РєР° РїР°РєРµС‚РЅРѕРіРѕ Р·Р°РїРёСЃСѓ СЂРµР№СЃСѓ С‚Р° Р»РѕРєР°С†С–Р№ РЅР° GitHub.")
+                print(f"❌ Помилка пакетного запису рейсу та локацій на GitHub.")
             else:
-                print(f"вњ… Р РµР№СЃ С‚Р° Р»РѕРєР°С†С–С— С„Р»РѕС‚Сѓ СѓСЃРїС–С€РЅРѕ Р·Р±РµСЂРµР¶РµРЅРѕ РѕРґРЅРёРј РєРѕРјС–С‚РѕРј!")
+                print(f"✅ Рейс та локації флоту успішно збережено одним комітом!")
                 if profile_changed:
                     client.loop.create_task(update_pilot_history_on_github(pilot_id, pilot_name, pilot_avatar))
 
@@ -376,22 +376,22 @@ async def update_pilot_history_on_github(pilot_id, new_name, new_avatar):
         "Cache-Control": "no-cache"
     }
     
-    print(f"рџ”„ РџРѕС‡РёРЅР°СЋ РјР°СЃРѕРІРµ РѕРЅРѕРІР»РµРЅРЅСЏ РїСЂРѕС„С–Р»СЋ РґР»СЏ {new_name} РЅР° GitHub...")
+    print(f"🔄 Починаю масове оновлення профілю для {new_name} на GitHub...")
     
-    # Р’РёРєРѕСЂРёСЃС‚РѕРІСѓС”РјРѕ Р·Р°РјРѕРє, С‰РѕР± РЅРµ Р·Р°РІР°Р¶Р°С‚Рё Р·Р°РїРёСЃСѓ РЅРѕРІРёС… СЂРµР№СЃС–РІ
+    # Використовуємо замок, щоб не заважати запису нових рейсів
     async with GITHUB_DB_LOCK:
         async with aiohttp.ClientSession() as session:
-            # 1. РћС‚СЂРёРјСѓС”РјРѕ СЃРїРёСЃРѕРє РІСЃС–С… С„Р°Р№Р»С–РІ Сѓ РїР°РїС†С– FLIGHTS
+            # 1. Отримуємо список всіх файлів у папці FLIGHTS
             dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/FLIGHTS?t={int(time.time())}"
             async with session.get(dir_url, headers=gh_headers) as dir_resp:
                 if dir_resp.status != 200: 
-                    print("вќЊ РџРѕРјРёР»РєР° РґРѕСЃС‚СѓРїСѓ РґРѕ РїР°РїРєРё FLIGHTS")
+                    print("❌ Помилка доступу до папки FLIGHTS")
                     return
                 dir_data = await dir_resp.json()
                 
             files_to_push = {}
             
-            # 2. РџСЂРѕС…РѕРґРёРјРѕСЃСЏ РїРѕ РєРѕР¶РЅРѕРјСѓ С„Р°Р№Р»Сѓ
+            # 2. Проходимося по кожному файлу
             for item in dir_data:
                 file_name = item.get("name", "")
                 
@@ -401,7 +401,7 @@ async def update_pilot_history_on_github(pilot_id, new_name, new_avatar):
                 file_path = item["path"]
                 file_sha = item["sha"]
                 
-                # Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ РІРјС–СЃС‚ С„Р°Р№Р»Сѓ С‡РµСЂРµР· Blob API (РѕР±С…С–Рґ РєРµС€Сѓ!)
+                # Завантажуємо вміст файлу через Blob API (обхід кешу!)
                 blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{file_sha}"
                 async with session.get(blob_url, headers=gh_headers) as blob_resp:
                     if blob_resp.status != 200: continue
@@ -410,12 +410,12 @@ async def update_pilot_history_on_github(pilot_id, new_name, new_avatar):
                         text_content = base64.b64decode(blob_data['content']).decode('utf-8')
                         file_content = json.loads(text_content)
                     except Exception as e: 
-                        print(f"РџРѕРјРёР»РєР° С‡РёС‚Р°РЅРЅСЏ Blob Сѓ С„РѕРЅС–: {e}")
+                        print(f"Помилка читання Blob у фоні: {e}")
                         continue
                         
                 changed = False
                 
-                # 3. РЁСѓРєР°С”РјРѕ РЅР°С€РѕРіРѕ РїС–Р»РѕС‚Р° РІ С†СЊРѕРјСѓ С„Р°Р№Р»С–
+                # 3. Шукаємо нашого пілота в цьому файлі
                 for p in file_content:
                     if p.get("pilot_id") == pilot_id:
                         if p.get("fullname") != new_name or p.get("avatar") != new_avatar:
@@ -424,29 +424,29 @@ async def update_pilot_history_on_github(pilot_id, new_name, new_avatar):
                             changed = True
                         break 
                         
-                # 4. РЇРєС‰Рѕ Р±СѓР»Рё Р·РјС–РЅРё - РґРѕРґР°С”РјРѕ Сѓ РєРѕС€РёРє РґР»СЏ РјР°СЃРѕРІРѕРіРѕ РїСѓС€Сѓ
+                # 4. Якщо були зміни - додаємо у кошик для масового пушу
                 if changed:
                     new_content_str = json.dumps(file_content, ensure_ascii=False, indent=4)
                     files_to_push[file_path] = new_content_str
                     
-                # РќРµРІРµР»РёРєР° РїР°СѓР·Р° РјС–Р¶ С‡РёС‚Р°РЅРЅСЏРјРё, С‰РѕР± РЅРµ РґСѓСЃРёС‚Рё GitHub GET-Р·Р°РїРёС‚Р°РјРё
+                # Невелика пауза між читаннями, щоб не дусити GitHub GET-запитами
                 await asyncio.sleep(0.1) 
 
-            # 5. Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РІСЃС– Р·РјС–РЅРµРЅС– С„Р°Р№Р»Рё РѕРґРЅРёРј РєРѕРјС–С‚РѕРј!
+            # 5. Відправляємо всі змінені файли одним комітом!
             if files_to_push:
-                commit_msg = f"рџ¤– Auto update profile info for {new_name}"
+                commit_msg = f"🤖 Auto update profile info for {new_name}"
                 success = await push_to_github_batch(session, files_to_push, commit_msg)
                 
                 if success:
                     try:
                         owner = await client.fetch_user(ADMIN_IDS[0])
-                        await owner.send(f"рџ”„ **РЎРёСЃС‚РµРјРЅРµ РѕРЅРѕРІР»РµРЅРЅСЏ!** РџС–Р»РѕС‚ `{new_name}` Р·РјС–РЅРёРІ РЅС–Рє Р°Р±Рѕ Р°РІР°С‚Р°СЂРєСѓ.\nРЈСЃРїС–С€РЅРѕ РѕРЅРѕРІР»РµРЅРѕ С„Р°Р№Р»С–РІ С–СЃС‚РѕСЂС–С— РЅР° GitHub (РѕРґРЅРёРј РєРѕРјС–С‚РѕРј): **{len(files_to_push)}** рџ—‚пёЏ.")
+                        await owner.send(f"🔄 **Системне оновлення!** Пілот `{new_name}` змінив нік або аватарку.\nУспішно оновлено файлів історії на GitHub (одним комітом): **{len(files_to_push)}** 🗂️.")
                     except Exception as e:
-                        print(f"РќРµ РІРґР°Р»РѕСЃСЏ РІС–РґРїСЂР°РІРёС‚Рё Р·РІС–С‚ Р°РґРјС–РЅСѓ: {e}")
+                        print(f"Не вдалося відправити звіт адміну: {e}")
                 else:
-                    print(f"вќЊ РџРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ РјР°СЃРѕРІРѕРіРѕ РїСѓС€Сѓ РѕРЅРѕРІР»РµРЅСЊ РїСЂРѕС„С–Р»СЋ РґР»СЏ {new_name}")
+                    print(f"❌ Помилка під час масового пушу оновлень профілю для {new_name}")
             else:
-                print(f"вњ… РћРЅРѕРІР»РµРЅРЅСЏ РїСЂРѕС„С–Р»СЋ Р·Р°РІРµСЂС€РµРЅРѕ: РЅРµ Р·РЅР°Р№РґРµРЅРѕ С„Р°Р№Р»С–РІ, СЏРєС– Р± РїРѕС‚СЂРµР±СѓРІР°Р»Рё Р·РјС–РЅ РґР»СЏ {new_name}.")
+                print(f"✅ Оновлення профілю завершено: не знайдено файлів, які б потребували змін для {new_name}.")
     
 def load_charters_state():
     if not CHARTERS_FILE.exists(): return {}
@@ -490,7 +490,7 @@ def save_hidden_users(data):
 
 HIDDEN_USERS = load_hidden_users()
 
-# рџ”Ґ Р‘Р›РћРљ Р¤РЈРќРљР¦Р†Р™ Р”Р›РЇ РЎРўРђРўРРЎРўРРљР рџ”Ґ
+# 🔥 БЛОК ФУНКЦІЙ ДЛЯ СТАТИСТИКИ 🔥
 def load_weekly_stats():
     if not WEEKLY_STATS_FILE.exists(): return {}
     try: return json.loads(WEEKLY_STATS_FILE.read_text(encoding="utf-8"))
@@ -605,11 +605,11 @@ def update_weekly_stats(f, week_tag):
                 is_accelerated = True
                 break
 
-    # 1. Hardest Landing - РїСЂРёР№РјР°С”РјРѕ Р’РЎР•, РЅР°РІС–С‚СЊ РєСЂР°С€С–!
+    # 1. Hardest Landing - приймаємо ВСЕ, навіть краші!
     if fpm_val < s["records"]["hardest"]["fpm"]:
         s["records"]["hardest"] = {"fpm": fpm_val, "g": check_g, "pilot": pilot}
 
-    # 2. Butter, Longest, Shortest - РўР†Р›Р¬РљР РґР»СЏ Р±РµР·РїРµС‡РЅРёС… (РЅРµ РєСЂР°С€С–РІ)
+    # 2. Butter, Longest, Shortest - ТІЛЬКИ для безпечних (не крашів)
     if not is_hard_crash:
         if fpm_val < 0 and fpm_val > s["records"]["butter"]["fpm"]:
             s["records"]["butter"] = {"fpm": fpm_val, "g": check_g, "pilot": pilot}
@@ -643,7 +643,7 @@ async def check_and_publish_weekly_stats(channel, state, ongoing_ids):
                     active_flight_exists = True
                     break
                 else:
-                    print(f"рџ‘» Р†РіРЅРѕСЂСѓС”РјРѕ Р·Р°РІРёСЃР»РёР№ СЂРµР№СЃ (РїСЂРёРІРёРґ): {fid}")
+                    print(f"👻 Ігноруємо завислий рейс (привид): {fid}")
                     
         if not active_flight_exists:
             try:
@@ -669,7 +669,7 @@ async def check_and_publish_weekly_stats(channel, state, ongoing_ids):
                 file_bin = io.BytesIO(json.dumps({week_tag: s}, indent=4).encode('utf-8'))
                 
                 await owner.send(
-                    content=f"рџ“Ѓ **РђСЂС…С–РІ С‚РёР¶РЅСЏ: {week_tag}** ({dates_str})", 
+                    content=f"📁 **Архів тижня: {week_tag}** ({dates_str})", 
                     file=discord.File(file_bin, filename=f"weekly_stats_{week_tag}.json")
                 )
             except Exception as e:
@@ -683,10 +683,10 @@ async def check_and_publish_weekly_stats(channel, state, ongoing_ids):
         save_weekly_stats(stats)
 
 async def publish_weekly_embed(channel, week_tag, s):
-	# --- РќРђРЁ Р‘Р•Р—РџР•Р§РќРР™ Р›РћРљРђР›Р¬РќРР™ РЎР›РћР’РќРРљ Р”Р›РЇ РЎРўРђРўРРЎРўРРљР ---
+	# --- НАШ БЕЗПЕЧНИЙ ЛОКАЛЬНИЙ СЛОВНИК ДЛЯ СТАТИСТИКИ ---
     manual_map = {'UK': 'UA', 'VH': 'HK'}
     def get_report_flag(icao):
-        if not icao or icao == "???": return "рџЏіпёЏ"
+        if not icao or icao == "???": return "🏳️"
         country = AIRPORTS_DB.get(icao.upper(), {}).get("country", "XX")
         if country == "XX" and len(icao) >= 2:
             country = manual_map.get(icao[:2].upper(), "XX")
@@ -700,35 +700,35 @@ async def publish_weekly_embed(channel, week_tag, s):
     avg_fpm = int(s["fpm_sum"] / fl)
     avg_g = round(s["g_sum"] / fl, 2)
     
-    medals = ["рџҐ‡", "рџҐ€", "рџҐ‰"]
+    medals = ["🥇", "🥈", "🥉"]
     
-    # --- РўРћРџ 3 РџР†Р›РћРўР ---
+    # --- ТОП 3 ПІЛОТИ ---
     sorted_pilots = sorted(s.get("pilots", {}).items(), key=lambda x: x[1], reverse=True)[:3]
     pilots_str = ""
     if not sorted_pilots:
-        pilots_str = "в•° None\n"
+        pilots_str = "╰ None\n"
     else:
         for i, (p_name, p_flights) in enumerate(sorted_pilots):
-            pilots_str += f"в•° {medals[i]} **{p_name}** ({p_flights} flights)\n"
+            pilots_str += f"╰ {medals[i]} **{p_name}** ({p_flights} flights)\n"
             
-    # --- РўРћРџ 3 РђР•Р РћРџРћР РўР ---
+    # --- ТОП 3 АЕРОПОРТИ ---
     sorted_apts = sorted(s.get("airports", {}).items(), key=lambda x: x[1], reverse=True)[:3]
     apts_str = ""
     if not sorted_apts:
-        apts_str = "в•° None\n"
+        apts_str = "╰ None\n"
     else:
         for i, (apt_icao, apt_ops) in enumerate(sorted_apts):
             apt_flag = get_report_flag(apt_icao)
-            apts_str += f"в•° {medals[i]} {apt_flag} **{apt_icao}** ({apt_ops} ops)\n"
+            apts_str += f"╰ {medals[i]} {apt_flag} **{apt_icao}** ({apt_ops} ops)\n"
             
-    # --- РўРћРџ 3 Р›Р†РўРђРљР ---
+    # --- ТОП 3 ЛІТАКИ ---
     sorted_acs = sorted(s.get("aircrafts", {}).items(), key=lambda x: x[1], reverse=True)[:3]
     acs_str = ""
     if not sorted_acs:
-        acs_str = "в•° None\n"
+        acs_str = "╰ None\n"
     else:
         for i, (ac_icao, ac_flights) in enumerate(sorted_acs):
-            acs_str += f"в•° {medals[i]} **{ac_icao}** ({ac_flights} flights)\n"
+            acs_str += f"╰ {medals[i]} **{ac_icao}** ({ac_flights} flights)\n"
             
     rec = s["records"]
     
@@ -738,64 +738,64 @@ async def publish_weekly_embed(channel, week_tag, s):
     earn_val = s['earnings']
     sign = "+" if earn_val >= 0 else "-" 
     
-    # --- Р‘Р›РћРљ Р”Р›РЇ РўРћРџ-3 РќРђР™Р”РћР’РЁРРҐ ---
+    # --- БЛОК ДЛЯ ТОП-3 НАЙДОВШИХ ---
     longest_str = ""
     if not rec['longest']:
-        longest_str = "в•° None\n"
+        longest_str = "╰ None\n"
     else:
         for i, r in enumerate(rec['longest']):
             l_dep = r.get('dep', '???')
             l_arr = r.get('arr', '???')
-            l_route = f" ({get_report_flag(l_dep)} {l_dep} вћ” {get_report_flag(l_arr)} {l_arr})" if l_dep != "???" else ""
-            longest_str += f"в•° {medals[i] if i < 3 else 'рџ”№'} {format_duration(r['time'])} вЂ” **{r.get('pilot', 'Unknown')}**{l_route}\n"
+            l_route = f" ({get_report_flag(l_dep)} {l_dep} ➔ {get_report_flag(l_arr)} {l_arr})" if l_dep != "???" else ""
+            longest_str += f"╰ {medals[i] if i < 3 else '🔹'} {format_duration(r['time'])} — **{r.get('pilot', 'Unknown')}**{l_route}\n"
 
-    # --- Р‘Р›РћРљ Р”Р›РЇ РўРћРџ-3 РќРђР™РљРћР РћРўРЁРРҐ ---
+    # --- БЛОК ДЛЯ ТОП-3 НАЙКОРОТШИХ ---
     shortest_str = ""
     if not rec['shortest']:
-        shortest_str = "в•° None\n"
+        shortest_str = "╰ None\n"
     else:
         for i, r in enumerate(rec['shortest']):
             s_dep = r.get('dep', '???')
             s_arr = r.get('arr', '???')
-            s_route = f" ({get_report_flag(s_dep)} {s_dep} вћ” {get_report_flag(s_arr)} {s_arr})" if s_dep != "???" else ""
-            shortest_str += f"в•° {medals[i] if i < 3 else 'рџ”№'} {format_duration(r['time'])} вЂ” **{r.get('pilot', 'Unknown')}**{s_route}\n"
+            s_route = f" ({get_report_flag(s_dep)} {s_dep} ➔ {get_report_flag(s_arr)} {s_arr})" if s_dep != "???" else ""
+            shortest_str += f"╰ {medals[i] if i < 3 else '🔹'} {format_duration(r['time'])} — **{r.get('pilot', 'Unknown')}**{s_route}\n"
     
     desc = (
-        f"### рџ“€ General Statistics\n"
-        f"рџ›« **Flights Completed:** {fl}\n"
-        f"рџ’° **Airline Earnings:** {sign}{abs(earn_val):,} $\n"
-        f"рџ‘« **Passengers Carried:** {s['pax']:,} Pax\n"
-        f"рџ“¦ **Cargo Carried:** {s['cargo']:,} kg\n\n"
+        f"### 📈 General Statistics\n"
+        f"🛫 **Flights Completed:** {fl}\n"
+        f"💰 **Airline Earnings:** {sign}{abs(earn_val):,} $\n"
+        f"👫 **Passengers Carried:** {s['pax']:,} Pax\n"
+        f"📦 **Cargo Carried:** {s['cargo']:,} kg\n\n"
         
-        f"### рџЏ† Weekly Records\n"
-        f"рџ‘ЁвЂЌвњ€пёЏ **Most Active Pilots:**\n"
+        f"### 🏆 Weekly Records\n"
+        f"👨‍✈️ **Most Active Pilots:**\n"
         f"{pilots_str}\n"
         
-        f"рџ§€ **Butter Landing:**\n"
-        f"в•° {rec['butter']['pilot']} ({rec['butter']['fpm']} fpm, {rec['butter']['g']} G)\n\n"
+        f"🧈 **Butter Landing:**\n"
+        f"╰ {rec['butter']['pilot']} ({rec['butter']['fpm']} fpm, {rec['butter']['g']} G)\n\n"
         
-        f"рџ›¬ **Hardest Landing:**\n"
-        f"в•° {rec['hardest']['pilot']} ({rec['hardest']['fpm']} fpm, {rec['hardest']['g']} G)\n\n"
+        f"🛬 **Hardest Landing:**\n"
+        f"╰ {rec['hardest']['pilot']} ({rec['hardest']['fpm']} fpm, {rec['hardest']['g']} G)\n\n"
         
-        f"рџђў **Longest Flights:**\n"
+        f"🐢 **Longest Flights:**\n"
         f"{longest_str}\n"
         
-        f"рџљЂ **Shortest Flights:**\n"
+        f"🚀 **Shortest Flights:**\n"
         f"{shortest_str}\n"
         
-        f"### в­ђ Company Averages\n"
-        f"рџ“Љ **Average Rating:** {avg_rating}\n"
-        f"рџ“‰ **Average FPM:** {avg_fpm} fpm | {avg_g} G\n\n"
+        f"### ⭐ Company Averages\n"
+        f"📊 **Average Rating:** {avg_rating}\n"
+        f"📉 **Average FPM:** {avg_fpm} fpm | {avg_g} G\n\n"
         
-        f"рџ“Ќ **Most Popular Airports:**\n"
+        f"📍 **Most Popular Airports:**\n"
         f"{apts_str}\n"
         
-        f"вњ€пёЏ **Most Popular Aircraft:**\n"
+        f"✈️ **Most Popular Aircraft:**\n"
         f"{acs_str.rstrip()}"
     )
     
     embed = discord.Embed(
-        title=f"рџ“Љ Weekly Summary for {dates_str}",
+        title=f"📊 Weekly Summary for {dates_str}",
         description=desc,
         color=0x3498db
     )
@@ -806,11 +806,11 @@ async def publish_weekly_embed(channel, week_tag, s):
     except Exception as e: 
         print(f"Error sending weekly embed: {e}")
         return None
-# рџ”Ґ РљР†РќР•Р¦Р¬ Р‘Р›РћРљРЈ РЎРўРђРўРРЎРўРРљР рџ”Ґ
+# 🔥 КІНЕЦЬ БЛОКУ СТАТИСТИКИ 🔥
 
-# --- рџЋ­ РЎРўРђРќР”РђР РўРќР† РЎРўРђРўРЈРЎР ---
+# --- 🎭 СТАНДАРТНІ СТАТУСИ ---
 DEFAULT_STATUSES = [
-    {"type": "play", "name": "рџ•№пёЏTracking with Newsky.app"}
+    {"type": "play", "name": "🕹️Tracking with Newsky.app"}
 ]
 
 def load_statuses():
@@ -827,7 +827,7 @@ def save_statuses():
     try:
         STATUS_FILE.write_text(json.dumps(status_list, indent=4), encoding="utf-8")
     except Exception as e:
-        print(f"вљ пёЏ Failed to save statuses: {e}")
+        print(f"⚠️ Failed to save statuses: {e}")
 
 status_list = load_statuses()
 status_cycle = cycle(status_list)
@@ -841,10 +841,10 @@ def clean_text(text):
         text = pattern.sub("", text)
     return text.strip().strip(",").strip()
 
-# --- рџЊЌ Р—РђР’РђРќРўРђР–Р•РќРќРЇ Р‘РђР—Р ---
+# --- 🌍 ЗАВАНТАЖЕННЯ БАЗИ ---
 async def update_airports_db():
     global AIRPORTS_DB
-    print("рџЊЌ Downloading airports database...")
+    print("🌍 Downloading airports database...")
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(AIRPORTS_DB_URL) as resp:
@@ -857,20 +857,20 @@ async def update_airports_db():
                             "city": v.get("city", ""),
                             "name": v.get("name", "")
                         }
-                    print(f"вњ… Airports DB loaded! ({len(AIRPORTS_DB)} airports)")
+                    print(f"✅ Airports DB loaded! ({len(AIRPORTS_DB)} airports)")
                 else:
-                    print(f"вљ пёЏ Failed to load airports DB: Status {resp.status}")
+                    print(f"⚠️ Failed to load airports DB: Status {resp.status}")
         except Exception as e:
-            print(f"вљ пёЏ Error loading DB: {e}")
+            print(f"⚠️ Error loading DB: {e}")
 
 def get_flag(country_code):
-    if not country_code or country_code == "XX": return "рџЏіпёЏ"
+    if not country_code or country_code == "XX": return "🏳️"
     try:
         return "".join([chr(ord(c) + 127397) for c in country_code.upper()])
     except:
-        return "рџЏіпёЏ"
+        return "🏳️"
 
-# --- рџ§  Р РћР—РЈРњРќР• Р¤РћР РњРЈР’РђРќРќРЇ РќРђР—Р’Р ---
+# --- 🧠 РОЗУМНЕ ФОРМУВАННЯ НАЗВИ ---
 def format_airport_string(icao, api_name):
     icao = icao.upper()
     db_data = AIRPORTS_DB.get(icao)
@@ -880,7 +880,7 @@ def format_airport_string(icao, api_name):
         name = db_data.get("name", "") or ""
         country = db_data.get("country", "XX")
         
-        # Р’РРџР РђР’Р›Р•РќРќРЇ РќРђР—Р’ РњР†РЎРў
+        # ВИПРАВЛЕННЯ НАЗВ МІСТ
         CITY_FIXES = {
             "Kiev": "Kyiv",
             "Dnipropetrovsk": "Dnipro",
@@ -892,7 +892,7 @@ def format_airport_string(icao, api_name):
             "Larnarca": "Larnaca",
             "Frankfurt-am-Main": "Frankfurt am Main",
             "Sharm el-Sheikh": "Sharm El Sheikh",
-            "Ajaccio/NapolГ©on Bonaparte": "Ajaccio",
+            "Ajaccio/Napoléon Bonaparte": "Ajaccio",
             "Ajaccio/Napoleon Bonaparte": "Ajaccio"
         }
         
@@ -918,7 +918,7 @@ def format_airport_string(icao, api_name):
 
         return f"{get_flag(country)} **{icao}** ({display_text})"
     
-    flag = "рџЏіпёЏ"
+    flag = "🏳️"
     if len(icao) >= 2:
         prefix = icao[:2]
         manual_map = {'UK': 'UA', 'VH': 'HK'}
@@ -930,10 +930,10 @@ def format_airport_string(icao, api_name):
 def get_timing(delay):
     try:
         d = float(delay)
-        if d > 15: return f"рџ”ґ **Delay** (+{int(d)} min)"
-        if d < -15: return f"рџџЎ **Early** ({int(d)} min)"
-        return "рџџў **On time**"
-    except: return "вЏ±пёЏ **N/A**"
+        if d > 15: return f"🔴 **Delay** (+{int(d)} min)"
+        if d < -15: return f"🟡 **Early** ({int(d)} min)"
+        return "🟢 **On time**"
+    except: return "⏱️ **N/A**"
 
 def format_time(minutes):
     if not minutes: return "00:00"
@@ -942,11 +942,11 @@ def format_time(minutes):
 def get_rating_square(rating):
     try:
         r = float(rating)
-        if r >= 8.0: return "рџџ©"
-        if r >= 6.0: return "рџџЁ" 
-        if r >= 4.0: return "рџџ§"
-        return "рџџҐ"
-    except: return "в¬њ"
+        if r >= 8.0: return "🟩"
+        if r >= 6.0: return "🟨" 
+        if r >= 4.0: return "🟧"
+        return "🟥"
+    except: return "⬜"
 
 # --- FPM + G-Force + Wind Search ---
 def get_landing_data(f, details_type):
@@ -955,7 +955,7 @@ def get_landing_data(f, details_type):
     if details_type == "test":
         fpm = -random.randint(50, 400)
         g = round(random.uniform(0.9, 1.8), 2)
-        return f"рџ“‰ **{fpm} fpm**, **{g} G**\n<:wind:1482073151071326229> **220В° | 8 kt** (Crosswind: 3 kt | Tailwind: 5 kt)"
+        return f"📉 **{fpm} fpm**, **{g} G**\n<:wind:1482073151071326229> **220° | 8 kt** (Crosswind: 3 kt | Tailwind: 5 kt)"
 
     fpm, g_force, found = 0, 0.0, False
     weather = {}
@@ -1013,11 +1013,11 @@ def get_landing_data(f, details_type):
                 comp.append(f"Tailwind: {int(round(abs(headwind_raw)))} kt")
                 
             extra_str = f" ({' | '.join(comp)})" if comp else ""
-            wind_str = f"\n<:wind:1482073151071326229> **{int(round(w_dir))}В° | {int(round(w_spd))} kt**{extra_str}"
+            wind_str = f"\n<:wind:1482073151071326229> **{int(round(w_dir))}° | {int(round(w_spd))} kt**{extra_str}"
             
-        return f"рџ“‰ **{fpm_val} fpm**{g_str}{wind_str}"
+        return f"📉 **{fpm_val} fpm**{g_str}{wind_str}"
     
-    return "рџ“‰ **N/A**"
+    return "📉 **N/A**"
 
 API_LOCK = None
 GITHUB_DB_LOCK = asyncio.Lock()
@@ -1029,40 +1029,40 @@ async def fetch_api(session, path, method="GET", body=None):
     if API_LOCK is None:
         API_LOCK = asyncio.Lock()
     
-    # 1. РЁРЈРљРђР„РњРћ Р’Р†Р›Р¬РќРР™ РљР›Р®Р§
+    # 1. ШУКАЄМО ВІЛЬНИЙ КЛЮЧ
     async with API_LOCK:
         now = time.time()
         
-        # РћС‡РёС‰Р°С”РјРѕ С–СЃС‚РѕСЂС–СЋ РІС–Рґ СЃС‚Р°СЂРёС… Р·Р°РїРёС‚С–РІ РґР»СЏ Р’РЎР†РҐ РєР»СЋС‡С–РІ (> 10 СЃРµРє)
+        # Очищаємо історію від старих запитів для ВСІХ ключів (> 10 сек)
         for key in NEWSKY_API_KEYS:
             KEY_USAGE_HISTORY[key] = [t for t in KEY_USAGE_HISTORY[key] if now - t < 10.0]
         
         selected_key = None
         
-        # РџСЂРѕС…РѕРґРёРјРѕСЃСЏ РїРѕ РєР»СЋС‡Р°С… РџРћ Р§Р•Р Р—Р† (СЃРїРѕС‡Р°С‚РєСѓ РіРѕР»РѕРІРЅРёР№, РїРѕС‚С–Рј СЂРµР·РµСЂРІРЅРёР№)
+        # Проходимося по ключах ПО ЧЕРЗІ (спочатку головний, потім резервний)
         for key in NEWSKY_API_KEYS:
             if len(KEY_USAGE_HISTORY[key]) < 5:
                 selected_key = key
-                break # Р—РЅР°Р№С€Р»Рё РєР»СЋС‡, Сѓ СЏРєРѕРіРѕ РјРµРЅС€Рµ 5 Р·Р°РїРёС‚С–РІ! Р—СѓРїРёРЅСЏС”РјРѕ РїРѕС€СѓРє.
+                break # Знайшли ключ, у якого менше 5 запитів! Зупиняємо пошук.
                 
-        # РЇРєС‰Рѕ Р’РЎР† РєР»СЋС‡С– Р·Р°Р№РЅСЏС‚С– (Сѓ РІСЃС–С… РїРѕ 5 Р·Р°РїРёС‚С–РІ)
+        # Якщо ВСІ ключі зайняті (у всіх по 5 запитів)
         if selected_key is None:
-            # Р—РЅР°С…РѕРґРёРјРѕ РєР»СЋС‡, СЏРєРёР№ Р·РІС–Р»СЊРЅРёС‚СЊСЃСЏ РЅР°Р№С€РІРёРґС€Рµ (Сѓ РєРѕРіРѕ РЅР°Р№СЃС‚Р°СЂС–С€РёР№ Р·Р°РїРёС‚)
+            # Знаходимо ключ, який звільниться найшвидше (у кого найстаріший запит)
             best_key_to_wait = min(NEWSKY_API_KEYS, key=lambda k: KEY_USAGE_HISTORY[k][0])
             oldest_request = KEY_USAGE_HISTORY[best_key_to_wait][0]
             wait_time = 10.0 - (now - oldest_request)
             
             if wait_time > 0:
-                print(f"рџљ¦ API Limit: РћР±РёРґРІР° РєР»СЋС‡С– Р·Р°Р№РЅСЏС‚С–! Р§РµРєР°С”РјРѕ {wait_time:.2f} СЃРµРє... (Р—Р°РїРёС‚: {path})")
+                print(f"🚦 API Limit: Обидва ключі зайняті! Чекаємо {wait_time:.2f} сек... (Запит: {path})")
                 await asyncio.sleep(wait_time)
                 now = time.time()
                 
             selected_key = best_key_to_wait
             
-        # Р—Р°РїРёСЃСѓС”РјРѕ РІРёРєРѕСЂРёСЃС‚Р°РЅРЅСЏ РІРёР±СЂР°РЅРѕРіРѕ РєР»СЋС‡Р°
+        # Записуємо використання вибраного ключа
         KEY_USAGE_HISTORY[selected_key].append(now)
 
-    # 2. Р РћР‘РРњРћ Р—РђРџРРў Р— Р’РР‘Р РђРќРРњ РљР›Р®Р§Р•Рњ
+    # 2. РОБИМО ЗАПИТ З ВИБРАНИМ КЛЮЧЕМ
     headers = {"Authorization": f"Bearer {selected_key}"}
     
     try:
@@ -1070,12 +1070,12 @@ async def fetch_api(session, path, method="GET", body=None):
             if r.status == 200:
                 return await r.json()
             elif r.status == 429:
-                print(f"вљ пёЏ Р—Р»РѕРІРёР»Рё 429 Too Many Requests РЅР° {path}! РЎРµСЂРІРµСЂ РїСЂРѕСЃРёС‚СЊ РїСЂРёРіР°Р»СЊРјСѓРІР°С‚Рё.")
+                print(f"⚠️ Зловили 429 Too Many Requests на {path}! Сервер просить пригальмувати.")
                 return None
             else:
                 return None
     except Exception as e:
-        print(f"вљ пёЏ API Error ({path}): {e}")
+        print(f"⚠️ API Error ({path}): {e}")
         return None
 
 # ---------- MESSAGE GENERATOR ----------
@@ -1086,7 +1086,7 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     else:
         flight_url = f"https://newsky.app/map/{fid}"
 
-	# ---  Р’РР—РќРђР§Р•РќРќРЇ РўРРџРЈ Р Р•Р™РЎРЈ (РЎРњРђР™Р›РРљ) ---
+	# ---  ВИЗНАЧЕННЯ ТИПУ РЕЙСУ (СМАЙЛИК) ---
     if f.get("schedule"):
         type_emoji = "<:sch:1496947924154847242>"
     elif f.get("charter"):
@@ -1094,9 +1094,9 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     else:
         type_emoji = "<:free:1496947871604539392>"
 
-    # --- рџЊђ Р’РР—РќРђР§Р•РќРќРЇ РњР•Р Р•Р–Р† (VATSIM/IVAO/OFFLINE) ---
+    # --- 🌐 ВИЗНАЧЕННЯ МЕРЕЖІ (VATSIM/IVAO/OFFLINE) ---
     net_data = f.get("network")
-    # РЇРєС‰Рѕ network РЅРµРјР°С” Р°Р±Рѕ С–Рј'СЏ null, С‚Рѕ OFFLINE
+    # Якщо network немає або ім'я null, то OFFLINE
     net = (net_data.get("name") if isinstance(net_data, dict) else str(net_data)) or "OFFLINE"
 
     cs = f.get("flightNumber") or f.get("callsign") or "N/A"
@@ -1106,17 +1106,17 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     dep_str = format_airport_string(f.get("dep", {}).get("icao", ""), f.get("dep", {}).get("name", ""))
     arr_str = format_airport_string(f.get("arr", {}).get("icao", ""), f.get("arr", {}).get("name", ""))
     
-    # --- рџ”Ђ Р›РћР“Р†РљРђ DIVERSION (Р—РњР†РќРђ РђР•Р РћРџРћР РўРЈ) ---
+    # --- 🔀 ЛОГІКА DIVERSION (ЗМІНА АЕРОПОРТУ) ---
     planned_arr_icao = f.get("arr", {}).get("icao", "").upper()
     act_arr = f.get("actArr", {})
     
     if isinstance(act_arr, dict):
         act_arr_icao = act_arr.get("icao", "").upper()
-        # РЇРєС‰Рѕ С„Р°РєС‚РёС‡РЅРёР№ ICAO С”, С– РІС–РЅ РІС–РґСЂС–Р·РЅСЏС”С‚СЊСЃСЏ РІС–Рґ Р·Р°РїР»Р°РЅРѕРІР°РЅРѕРіРѕ
+        # Якщо фактичний ICAO є, і він відрізняється від запланованого
         if act_arr_icao and act_arr_icao != planned_arr_icao and act_arr_icao != "???":
             act_arr_str = format_airport_string(act_arr_icao, act_arr.get("name", ""))
-            # Р—Р°РєСЂРµСЃР»СЋС”РјРѕ СЃС‚Р°СЂРёР№ Р°РµСЂРѕРїРѕСЂС‚ С– РґРѕРґР°С”РјРѕ С„Р°РєС‚РёС‡РЅРёР№
-            arr_str = f"~~{arr_str}~~ \u2003рџ”Ђ\u2003 {act_arr_str}"
+            # Закреслюємо старий аеропорт і додаємо фактичний
+            arr_str = f"~~{arr_str}~~ \u2003🔀\u2003 {act_arr_str}"
     # ---------------------------------------------
     
     ac = f.get("aircraft", {}).get("airframe", {}).get("name", "A/C")
@@ -1131,21 +1131,21 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     
     flight_type = f.get("type", "pax")
     
-    # --- Р’РРџР РђР’Р›Р•РќРќРЇ Р’РђР“Р Р’РђРќРўРђР–РЈ ---
+    # --- ВИПРАВЛЕННЯ ВАГИ ВАНТАЖУ ---
     cargo_kg = int(f.get("payload", {}).get("weights", {}).get("cargo", 0))
 
     if flight_type == "cargo":
-        payload_str = f"рџ“¦ **{cargo_kg}** kg"
+        payload_str = f"📦 **{cargo_kg}** kg"
     else:
-        payload_str = f"рџ‘« **{raw_pax}** Pax  |  рџ“¦ **{cargo_kg}** kg"
+        payload_str = f"👫 **{raw_pax}** Pax  |  📦 **{cargo_kg}** kg"
 
     embed = None
-    arrow = " \u2003вћЎпёЏ\u2003 "
+    arrow = " \u2003➡️\u2003 "
 
     if status == "Departed":
         delay = f.get("delay", 0)
         
-        # --- Р РћР—Р РђРҐРЈРќРћРљ TAXI TIME ---
+        # --- РОЗРАХУНОК TAXI TIME ---
         taxi_str = ""
         try:
             t_gate_str = f.get("depTimeAct")
@@ -1156,20 +1156,20 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
                 t_air = datetime.fromisoformat(t_air_str.replace("Z", "+00:00"))
                 diff = t_air - t_gate
                 taxi_min = int(diff.total_seconds() // 60)
-                taxi_str = f"рџљ• **Taxi:** {taxi_min} min\n\n"
+                taxi_str = f"🚕 **Taxi:** {taxi_min} min\n\n"
         except Exception as e:
             print(f"Taxi Calc Error: {e}")
 
         desc = (
             f"{dep_str}{arrow}{arr_str}\n\n"
-            f"вњ€пёЏ **{ac}**\n\n"
+            f"✈️ **{ac}**\n\n"
             f"{get_timing(delay)}\n" 
             f"{taxi_str}"            
-            f"рџ‘ЁвЂЌвњ€пёЏ **{pilot}**\n\n"
-            f"рџЊђ **{net.upper()}**\n\n"
+            f"👨‍✈️ **{pilot}**\n\n"
+            f"🌐 **{net.upper()}**\n\n"
             f"{payload_str}"
         )
-        embed = discord.Embed(title=f"{type_emoji} рџ›« {full_cs} departed", url=flight_url, description=desc, color=0x3498db)
+        embed = discord.Embed(title=f"{type_emoji} 🛫 {full_cs} departed", url=flight_url, description=desc, color=0x3498db)
 
     elif status == "Completed":
         t = f.get("result", {}).get("totals", {})
@@ -1183,11 +1183,11 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
         
         check_g = 0.0
         check_fpm = 0
-        has_crash_title = False # рџ”ґ РќРћР’Рђ Р—РњР†РќРќРђ: РЁСѓРєР°С”РјРѕ РєСЂР°С€ Сѓ С‚РµРєСЃС‚С–
+        has_crash_title = False # 🔴 НОВА ЗМІННА: Шукаємо краш у тексті
         
         if "result" in f and "violations" in f["result"]:
             for v in f["result"]["violations"]:
-                # РџРµСЂРµРІС–СЂСЏС”РјРѕ РЅР°СЏРІРЅС–СЃС‚СЊ Р±Р°Р·РѕРІРѕС— С„СЂР°Р·Рё РєСЂР°С€Сѓ
+                # Перевіряємо наявність базової фрази крашу
                 if "Crashed on landing" in v.get("title", ""):
                     has_crash_title = True
                     
@@ -1200,38 +1200,38 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
             check_g = float(f["landing"].get("gForce", 0))
             check_fpm = int(f["landing"].get("rate", 0) or f["landing"].get("touchDownRate", 0))
 
-        title_text = f"{type_emoji} рџЋ {full_cs} completed"
+        title_text = f"{type_emoji} 😎 {full_cs} completed"
         color_code = 0x2ecc71
         rating_str = f"{get_rating_square(rating)} **{rating}**"
 
-        # рџ”Ґ РџРµСЂРµРІС–СЂРєР° РЅР° РєСЂР°С€ (3G, 2000fpm РђР‘Рћ РЅР°СЏРІРЅС–СЃС‚СЊ С„СЂР°Р·Рё Crashed on landing) рџ”Ґ
+        # 🔥 Перевірка на краш (3G, 2000fpm АБО наявність фрази Crashed on landing) 🔥
         is_hard_crash = abs(check_g) > 3.0 or abs(check_fpm) > 2000 or has_crash_title
         
         time_info_str = f"{get_timing(delay)}\n\n"
 
         if is_hard_crash: 
-            title_text = f"{type_emoji} рџ’Ґ {full_cs} CRASHED"
+            title_text = f"{type_emoji} 💥 {full_cs} CRASHED"
             color_code = 0x992d22 
-            rating_str = "рџ’Ђ **CRASH**"
+            rating_str = "💀 **CRASH**"
             time_info_str = "" 
         
         elif f.get("emergency") is True:
-            title_text = f"{type_emoji} вљ пёЏ {full_cs} EMERGENCY"
+            title_text = f"{type_emoji} ⚠️ {full_cs} EMERGENCY"
             color_code = 0xe67e22 
-            rating_str = "рџџҐ **EMEG**"
+            rating_str = "🟥 **EMEG**"
             
         landing_info = get_landing_data(f, details_type)
 
         desc = (
             f"{dep_str}{arrow}{arr_str}\n\n"
-            f"вњ€пёЏ **{ac}**\n\n"
+            f"✈️ **{ac}**\n\n"
             f"{time_info_str}" 
-            f"рџ‘ЁвЂЌвњ€пёЏ **{pilot}**\n\n"
-            f"рџЊђ **{net.upper()}**\n\n"
+            f"👨‍✈️ **{pilot}**\n\n"
+            f"🌐 **{net.upper()}**\n\n"
             f"{landing_info}\n\n" 
             f"{payload_str}\n\n"
-            f"рџ“Џ **{dist}** nm  |  вЏ±пёЏ **{format_time(ftime)}**\n\n"
-            f"рџ’° **{formatted_balance} $**\n\n"
+            f"📏 **{dist}** nm  |  ⏱️ **{format_time(ftime)}**\n\n"
+            f"💰 **{formatted_balance} $**\n\n"
             f"{rating_str}"
         )
         embed = discord.Embed(title=title_text, url=flight_url, description=desc, color=color_code)
@@ -1249,30 +1249,30 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
 
         desc = (
             f"{dep_str}{arrow}{arr_str}\n\n"
-            f"вњ€пёЏ **{ac}**\n\n"
-            f"рџ“Ќ **Status:** Flight Cancelled / Connection Lost\n"
-            f"вЏ±пёЏ **Flight time:** ~{flight_duration} min\n\n"
-            f"рџ‘ЁвЂЌвњ€пёЏ **{pilot}**\n\n"
-            f"рџЊђ **{net.upper()}**\n\n"
+            f"✈️ **{ac}**\n\n"
+            f"📍 **Status:** Flight Cancelled / Connection Lost\n"
+            f"⏱️ **Flight time:** ~{flight_duration} min\n\n"
+            f"👨‍✈️ **{pilot}**\n\n"
+            f"🌐 **{net.upper()}**\n\n"
             f"{payload_str}"
         )
-        embed = discord.Embed(title=f"вљ« {full_cs} flight cancelled", url=flight_url, description=desc, color=0x2b2d31)
+        embed = discord.Embed(title=f"⚫ {full_cs} flight cancelled", url=flight_url, description=desc, color=0x2b2d31)
 
     if embed:
         try:
-            # --- РЎРўР’РћР Р®Р„РњРћ РљРќРћРџРљР РўР†Р›Р¬РљР Р”Р›РЇ Р—РђРљР РРўРРҐ Р Р•Р™РЎР†Р’ ---
+            # --- СТВОРЮЄМО КНОПКИ ТІЛЬКИ ДЛЯ ЗАКРИТИХ РЕЙСІВ ---
             view = discord.ui.View(timeout=None)
             if status == "Completed":
-                # 1. РљРЅРѕРїРєР° СЃС‚Р°С‚РёСЃС‚РёРєРё
-                view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="рџЊЌ Global Stats", custom_id=f"gstats_{fid}"))
+                # 1. Кнопка статистики
+                view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="🌍 Global Stats", custom_id=f"gstats_{fid}"))
                 
-                # 2. РљРЅРѕРїРєР° РєР°Р±С–РЅРµС‚Сѓ РїС–Р»РѕС‚Р°
+                # 2. Кнопка кабінету пілота
                 pilot_id = f.get("pilot", {}).get("_id", "unknown")
                 if pilot_id != "unknown":
                     profile_url = f"https://kazuar.in.ua/pilot-cabinet.html#profile/{pilot_id}"
-                    view.add_item(discord.ui.Button(label="РћСЃРѕР±РёСЃС‚РёР№ РєР°Р±С–РЅРµС‚ РїС–Р»РѕС‚Р°", style=discord.ButtonStyle.link, url=profile_url))
+                    view.add_item(discord.ui.Button(label="Особистий кабінет пілота", style=discord.ButtonStyle.link, url=profile_url))
                 
-            # Р РѕР·СѓРјРЅР° РІС–РґРїСЂР°РІРєР° (Р· РєРЅРѕРїРєРѕСЋ С– СЂРµРїР»Р°С”Рј, СЏРєС‰Рѕ С‚СЂРµР±Р°)
+            # Розумна відправка (з кнопкою і реплаєм, якщо треба)
             kwargs = {"embed": embed}
             if status == "Completed": 
                 kwargs["view"] = view
@@ -1281,7 +1281,7 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
 
             sent_msg = await channel.send(**kwargs)
                 
-            # рџ”Ґ РњРђР“Р†РЇ Р“Р РћРЁР•Р™: Р РµР°РєС†С–С— Р·Р°Р»РµР¶РЅРѕ РІС–Рґ СЃСѓРјРё РїСЂРёР±СѓС‚РєСѓ рџ”Ґ
+            # 🔥 МАГІЯ ГРОШЕЙ: Реакції залежно від суми прибутку 🔥
             if status == "Completed":
                 t = f.get("result", {}).get("totals", {})
                 balance = int(t.get("balance", 0))
@@ -1302,7 +1302,7 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
                             print(f"Jackpot reaction error: {e}")
                             
                 elif balance > 50000:
-                    # РЇРєС‰Рѕ РІС–Рґ 30Рє РґРѕ 120Рє: РІРёР±РёСЂР°С”РјРѕ РѕРґРёРЅ СЂР°РЅРґРѕРјРЅРёР№ РіСЂРѕС€РѕРІРёР№
+                    # Якщо від 30к до 120к: вибираємо один рандомний грошовий
                     try:
                         await sent_msg.add_reaction(random.choice(money_emojis))
                     except Exception as e:
@@ -1313,28 +1313,28 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
             print(f"Send error: {e}")
             return None
 
-# --- Р РћР—РЈРњРќРђ РЎРРЎРўР•РњРђ РЎРўРђРўРЈРЎР†Р’ Р— Р“Р РђР¤Р†РљРћРњ (РљРР‡Р’РЎР¬РљРР™ Р§РђРЎ) ---
+# --- РОЗУМНА СИСТЕМА СТАТУСІВ З ГРАФІКОМ (КИЇВСЬКИЙ ЧАС) ---
 async def status_loop():
     await client.wait_until_ready()
     
     while not client.is_closed():
-        # РћС‚СЂРёРјСѓС”РјРѕ РїРѕС‚РѕС‡РЅРёР№ С‡Р°СЃ (UTC +3 РіРѕРґРёРЅРё РґР»СЏ Р»С–С‚РЅСЊРѕРіРѕ РљРёС”РІР°)
+        # Отримуємо поточний час (UTC +3 години для літнього Києва)
         kyiv_time = datetime.now(timezone.utc) + timedelta(hours=3)
         hour = kyiv_time.hour
         
-        # 1. Р’РР—РќРђР§РђР„РњРћ РњР•Р Р•Р–Р•Р’РР™ РЎРўРђРўРЈРЎ (РљРћР›Р†Р ) Р—Рђ Р“Р РђР¤Р†РљРћРњ
+        # 1. ВИЗНАЧАЄМО МЕРЕЖЕВИЙ СТАТУС (КОЛІР) ЗА ГРАФІКОМ
         discord_status = discord.Status.online
         
         if 8 <= hour < 12:
-            discord_status = discord.Status.online      # 08:00 - 12:00: Р’ РјРµСЂРµР¶С– (Р—РµР»РµРЅРёР№)
+            discord_status = discord.Status.online      # 08:00 - 12:00: В мережі (Зелений)
         elif 12 <= hour < 14:
-            discord_status = discord.Status.idle        # 12:00 - 14:00: Р’С–РґС–Р№С€РѕРІ (Р–РѕРІС‚РёР№ РјС–СЃСЏС†СЊ)
+            discord_status = discord.Status.idle        # 12:00 - 14:00: Відійшов (Жовтий місяць)
         elif 14 <= hour < 20:
-            discord_status = discord.Status.online      # 14:00 - 20:00: Р’ РјРµСЂРµР¶С– (Р—РµР»РµРЅРёР№)
+            discord_status = discord.Status.online      # 14:00 - 20:00: В мережі (Зелений)
         else:
-            discord_status = discord.Status.dnd         # 20:00 - 08:00: РќРµ С‚СѓСЂР±СѓРІР°С‚Рё (Р§РµСЂРІРѕРЅРёР№)
+            discord_status = discord.Status.dnd         # 20:00 - 08:00: Не турбувати (Червоний)
 
-        # 2. Р’РР—РќРђР§РђР„РњРћ РўР•РљРЎРўРћР’РР™ РЎРўРђРўРЈРЎ
+        # 2. ВИЗНАЧАЄМО ТЕКСТОВИЙ СТАТУС
         current_status = next(status_cycle)
         activity_type = discord.ActivityType.playing
         
@@ -1345,24 +1345,24 @@ async def status_loop():
             
         activity = discord.Activity(type=activity_type, name=current_status["name"])
         
-        # 3. Р’Р†Р”РџР РђР’Р›РЇР„РњРћ Р’ DISCORD РћР”РќРћР§РђРЎРќРћ
+        # 3. ВІДПРАВЛЯЄМО В DISCORD ОДНОЧАСНО
         try:
             await client.change_presence(status=discord_status, activity=activity)
         except Exception as e:
-            print(f"РџРѕРјРёР»РєР° РѕРЅРѕРІР»РµРЅРЅСЏ СЃС‚Р°С‚СѓСЃСѓ: {e}")
+            print(f"Помилка оновлення статусу: {e}")
             
-        # 4. Р РђРҐРЈР„РњРћ Р§РђРЎ Р”Рћ РќРђРЎРўРЈРџРќРћР‡ Р“РћР”РРќР (РЅР°РїСЂ. РґРѕ 15:00:00)
-        # РћРЅРѕРІР»СЋС”РјРѕ Р·РјС–РЅРЅСѓ С‡Р°СЃСѓ, С‰РѕР± РІСЂР°С…СѓРІР°С‚Рё РјС–Р»С–СЃРµРєСѓРЅРґРё, РІРёС‚СЂР°С‡РµРЅС– РЅР° РІС–РґРїСЂР°РІРєСѓ Р·Р°РїРёС‚Сѓ
+        # 4. РАХУЄМО ЧАС ДО НАСТУПНОЇ ГОДИНИ (напр. до 15:00:00)
+        # Оновлюємо змінну часу, щоб врахувати мілісекунди, витрачені на відправку запиту
         now = datetime.now(timezone.utc) + timedelta(hours=3)
         next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         
-        # Р’РёР·РЅР°С‡Р°С”РјРѕ С‚РѕС‡РЅСѓ РєС–Р»СЊРєС–СЃС‚СЊ СЃРµРєСѓРЅРґ РґРѕ РїРѕС‡Р°С‚РєСѓ РЅР°СЃС‚СѓРїРЅРѕС— РіРѕРґРёРЅРё
+        # Визначаємо точну кількість секунд до початку наступної години
         sleep_seconds = (next_hour - now).total_seconds()
         
-        # Р‘РѕС‚ Р·Р°СЃРёРЅР°С” СЂС–РІРЅРѕ РґРѕ РїРѕС‡Р°С‚РєСѓ РЅР°СЃС‚СѓРїРЅРѕС— РіРѕРґРёРЅРё
+        # Бот засинає рівно до початку наступної години
         await asyncio.sleep(sleep_seconds)
 
-# --- рџ”Ќ Р¤РЈРќРљР¦Р†РЇ: РЈРЅС–РІРµСЂСЃР°Р»СЊРЅРёР№ РїРѕС€СѓРє РїРѕРІС–РґРѕРјР»РµРЅСЊ (DRY РїСЂРёРЅС†РёРї) ---
+# --- 🔍 ФУНКЦІЯ: Універсальний пошук повідомлень (DRY принцип) ---
 async def find_discord_message(target_id, command_message):
     found_message = None
     main_channel = client.get_channel(CHANNEL_ID)
@@ -1374,7 +1374,7 @@ async def find_discord_message(target_id, command_message):
             pass
     
     if not found_message:
-        await command_message.channel.send("рџ”Ќ **Searching for message...**")
+        await command_message.channel.send("🔍 **Searching for message...**")
         for guild in client.guilds:
             for channel in guild.text_channels:
                 if channel.id == CHANNEL_ID: continue
@@ -1388,13 +1388,13 @@ async def find_discord_message(target_id, command_message):
     return found_message
 # -----------------------------------------------------------------
 
-# --- рџЊЌ Р РђР”РђР  РљРќРћРџРћРљ РЎРўРђРўРРЎРўРРљР (GLOBAL STATS) ---
+# --- 🌍 РАДАР КНОПОК СТАТИСТИКИ (GLOBAL STATS) ---
 @client.event
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.component:
         custom_id = interaction.data.get("custom_id", "")
         
-        # РџРµСЂРµРІС–СЂСЏС”РјРѕ С”РґРёРЅСѓ РєРЅРѕРїРєСѓ
+        # Перевіряємо єдину кнопку
         if custom_id.startswith("gstats_"):
             flight_id = custom_id.split("_")[1]
             is_uk = str(interaction.locale) == 'uk'
@@ -1405,7 +1405,7 @@ async def on_interaction(interaction):
                 det = await fetch_api(session, f"/flight/{flight_id}")
                 
             if not det or "flight" not in det:
-                err_msg_text = "вќЊ **РџРѕРјРёР»РєР°:** Р”Р°РЅС– РїСЂРѕ СЂРµР№СЃ РЅРµ Р·РЅР°Р№РґРµРЅРѕ РІ Р±Р°Р·С–." if is_uk else "вќЊ **Error:** Flight data not found in the database."
+                err_msg_text = "❌ **Помилка:** Дані про рейс не знайдено в базі." if is_uk else "❌ **Error:** Flight data not found in the database."
                 err_msg = await interaction.followup.send(err_msg_text, ephemeral=True)
                 async def delete_err_msg():
                     await asyncio.sleep(120)
@@ -1419,7 +1419,7 @@ async def on_interaction(interaction):
             exp = f.get("result", {}).get("expenses", {})
             
             # ==========================================
-            # --- 1. РљРђР РўРљРђ РџРђР›РР’Рђ ---
+            # --- 1. КАРТКА ПАЛИВА ---
             # ==========================================
             fuel_kg = int(t.get("fuel", 0))
             fuel_price = int(exp.get("fuel", 0) or t.get("fuelPrice", 0))
@@ -1430,23 +1430,23 @@ async def on_interaction(interaction):
             
             if is_uk:
                 fuel_desc = (
-                    f"рџ›ўпёЏ **РЎРїР°Р»РµРЅРѕ РїР°Р»РёРІР°:** {fuel_kg:,} РєРі\n".replace(",", " ") +
-                    f"рџ’µ **Р’Р°СЂС‚С–СЃС‚СЊ РїР°Р»РёРІР°:** {fuel_price:,} $\n".replace(",", " ") +
-                    f"рџ“Љ **Р¦С–РЅР° Р·Р° 1 С‚РѕРЅРЅСѓ:** {cost_per_ton:,} $\n".replace(",", " ") +
-                    f"рџ“Џ **Р’РёС‚СЂР°С‚Р° РЅР° РјРёР»СЋ:** {burn_per_nm} РєРі/nm"
+                    f"🛢️ **Спалено палива:** {fuel_kg:,} кг\n".replace(",", " ") +
+                    f"💵 **Вартість палива:** {fuel_price:,} $\n".replace(",", " ") +
+                    f"📊 **Ціна за 1 тонну:** {cost_per_ton:,} $\n".replace(",", " ") +
+                    f"📏 **Витрата на милю:** {burn_per_nm} кг/nm"
                 )
-                embed_fuel = discord.Embed(title="в›Ѕ Р”РµС‚Р°Р»СЊРЅР° СЃС‚Р°С‚РёСЃС‚РёРєР° РїР°Р»РёРІР°", description=fuel_desc, color=0xf1c40f)
+                embed_fuel = discord.Embed(title="⛽ Детальна статистика палива", description=fuel_desc, color=0xf1c40f)
             else:
                 fuel_desc = (
-                    f"рџ›ўпёЏ **Fuel Burned:** {fuel_kg:,} kg\n".replace(",", " ") +
-                    f"рџ’µ **Fuel Cost:** {fuel_price:,} $\n".replace(",", " ") +
-                    f"рџ“Љ **Price per Tonne:** {cost_per_ton:,} $\n".replace(",", " ") +
-                    f"рџ“Џ **Burn per NM:** {burn_per_nm} kg/nm"
+                    f"🛢️ **Fuel Burned:** {fuel_kg:,} kg\n".replace(",", " ") +
+                    f"💵 **Fuel Cost:** {fuel_price:,} $\n".replace(",", " ") +
+                    f"📊 **Price per Tonne:** {cost_per_ton:,} $\n".replace(",", " ") +
+                    f"📏 **Burn per NM:** {burn_per_nm} kg/nm"
                 )
-                embed_fuel = discord.Embed(title="в›Ѕ Detailed Fuel Stats", description=fuel_desc, color=0xf1c40f)
+                embed_fuel = discord.Embed(title="⛽ Detailed Fuel Stats", description=fuel_desc, color=0xf1c40f)
 
             # ==========================================
-            # --- 2. РљРђР РўРљРђ РџРђРЎРђР–РР Р†Р’ / РљРђР Р“Рћ ---
+            # --- 2. КАРТКА ПАСАЖИРІВ / КАРГО ---
             # ==========================================
             flight_type = f.get("type", "pax")
             
@@ -1465,24 +1465,24 @@ async def on_interaction(interaction):
                 
                 if is_uk:
                     payload_desc = (
-                        f"вљ–пёЏ **Р—Р°РІР°РЅС‚Р°Р¶РµРЅС–СЃС‚СЊ РѕР±'С”РјСѓ:** {cargo_actual} / {cargo_cap} РѕРґРёРЅРёС†СЊ ({load_factor}%)\n"
-                        f"рџ“¦ **Р—Р°РіР°Р»СЊРЅР° РјР°СЃР° РІР°РЅС‚Р°Р¶Сѓ:** {cargo_kg:,} РєРі\n\n".replace(",", " ") +
-                        f"рџ“‰ **Р•РєРѕРЅРѕРјС–РєР° СЂРµР№СЃСѓ:**\n"
-                        f"в”њ рџ’µ Р”РѕС…С–Рґ Р· РІР°РЅС‚Р°Р¶Сѓ: {cargo_rev:,} $ *(РўР°СЂРёС„: {unit_price} $ / РѕРґ.)*\n".replace(",", " ") +
-                        f"в”њ рџ§ѕ Р’РёС‚СЂР°С‚Рё: {total_expenses:,} $\n".replace(",", " ") +
-                        f"в”” рџ’° Р§РёСЃС‚РёР№ РїСЂРёР±СѓС‚РѕРє: {balance:,} $".replace(",", " ")
+                        f"⚖️ **Завантаженість об'єму:** {cargo_actual} / {cargo_cap} одиниць ({load_factor}%)\n"
+                        f"📦 **Загальна маса вантажу:** {cargo_kg:,} кг\n\n".replace(",", " ") +
+                        f"📉 **Економіка рейсу:**\n"
+                        f"├ 💵 Дохід з вантажу: {cargo_rev:,} $ *(Тариф: {unit_price} $ / од.)*\n".replace(",", " ") +
+                        f"├ 🧾 Витрати: {total_expenses:,} $\n".replace(",", " ") +
+                        f"└ 💰 Чистий прибуток: {balance:,} $".replace(",", " ")
                     )
-                    embed_payload = discord.Embed(title="рџ“¦ РЎРўРђРўРРЎРўРРљРђ РљРћРњР•Р Р¦Р†Р™РќРћР“Рћ Р’РђРќРўРђР–РЈ", description=payload_desc, color=0xe67e22)
+                    embed_payload = discord.Embed(title="📦 СТАТИСТИКА КОМЕРЦІЙНОГО ВАНТАЖУ", description=payload_desc, color=0xe67e22)
                 else:
                     payload_desc = (
-                        f"вљ–пёЏ **Volume Load:** {cargo_actual} / {cargo_cap} units ({load_factor}%)\n"
-                        f"рџ“¦ **Total Cargo Weight:** {cargo_kg:,} kg\n\n".replace(",", " ") +
-                        f"рџ“‰ **Flight Economics:**\n"
-                        f"в”њ рџ’µ Cargo Revenue: {cargo_rev:,} $ *(Rate: {unit_price} $ / unit)*\n".replace(",", " ") +
-                        f"в”њ рџ§ѕ Expenses: {total_expenses:,} $\n".replace(",", " ") +
-                        f"в”” рџ’° Net Profit: {balance:,} $".replace(",", " ")
+                        f"⚖️ **Volume Load:** {cargo_actual} / {cargo_cap} units ({load_factor}%)\n"
+                        f"📦 **Total Cargo Weight:** {cargo_kg:,} kg\n\n".replace(",", " ") +
+                        f"📉 **Flight Economics:**\n"
+                        f"├ 💵 Cargo Revenue: {cargo_rev:,} $ *(Rate: {unit_price} $ / unit)*\n".replace(",", " ") +
+                        f"├ 🧾 Expenses: {total_expenses:,} $\n".replace(",", " ") +
+                        f"└ 💰 Net Profit: {balance:,} $".replace(",", " ")
                     )
-                    embed_payload = discord.Embed(title="рџ“¦ COMMERCIAL CARGO STATS", description=payload_desc, color=0xe67e22)
+                    embed_payload = discord.Embed(title="📦 COMMERCIAL CARGO STATS", description=payload_desc, color=0xe67e22)
             else:
                 pax_cap = int(f.get("payload", {}).get("paxCapacity", 1))
                 pax_actual = int(t.get("payload", {}).get("pax", 0))
@@ -1493,33 +1493,33 @@ async def on_interaction(interaction):
                 classes_data = t.get("payload", {}).get("paxByClass", {})
                 base_price = int(t.get("prices", {}).get("ticketPrice", 0))
                 
-                str_fare = "РўР°СЂРёС„" if is_uk else "Fare"
-                str_first = "РџРµСЂС€РёР№" if is_uk else "First"
-                str_bus = "Р‘С–Р·РЅРµСЃ" if is_uk else "Business"
-                str_eco = "Р•РєРѕРЅРѕРј" if is_uk else "Economy"
-                str_pax = "РїР°СЃ." if is_uk else "pax"
+                str_fare = "Тариф" if is_uk else "Fare"
+                str_first = "Перший" if is_uk else "First"
+                str_bus = "Бізнес" if is_uk else "Business"
+                str_eco = "Економ" if is_uk else "Economy"
+                str_pax = "пас." if is_uk else "pax"
                 
-                # Р—Р±РёСЂР°С”РјРѕ РІСЃС– РЅР°СЏРІРЅС– РєР»Р°СЃРё РІ РѕРєСЂРµРјРёР№ СЃРїРёСЃРѕРє
+                # Збираємо всі наявні класи в окремий список
                 available_classes = []
                 if classes_data.get("F", 0) > 0:
-                    available_classes.append(f"рџҐ‚**{str_first}:** {classes_data['F']} {str_pax} ({str_fare}: {base_price * 4} $)")
+                    available_classes.append(f"🥂**{str_first}:** {classes_data['F']} {str_pax} ({str_fare}: {base_price * 4} $)")
                 if classes_data.get("C", 0) > 0:
-                    available_classes.append(f"рџ’ј**{str_bus}:** {classes_data['C']} {str_pax} ({str_fare}: {base_price * 2} $)")
+                    available_classes.append(f"💼**{str_bus}:** {classes_data['C']} {str_pax} ({str_fare}: {base_price * 2} $)")
                 if classes_data.get("Y", 0) > 0:
-                    available_classes.append(f"рџЋџпёЏ**{str_eco}:** {classes_data['Y']} {str_pax} ({str_fare}: {base_price} $)")
+                    available_classes.append(f"🎟️**{str_eco}:** {classes_data['Y']} {str_pax} ({str_fare}: {base_price} $)")
 
-                # Р¤РѕСЂРјСѓС”РјРѕ РєСЂР°СЃРёРІРёР№ С‚РµРєСЃС‚ С–Р· РїСЂР°РІРёР»СЊРЅРёРјРё Р»С–РЅС–СЏРјРё
+                # Формуємо красивий текст із правильними лініями
                 classes_str = ""
                 if not available_classes:
-                    classes_str = "в”” рџЋџпёЏ РќРµРјР°С” РґР°РЅРёС… РїСЂРѕ РєР»Р°СЃРё\n" if is_uk else "в”” рџЋџпёЏ No class data available\n"
+                    classes_str = "└ 🎟️ Немає даних про класи\n" if is_uk else "└ 🎟️ No class data available\n"
                 else:
                     for i, cls_text in enumerate(available_classes):
-                        # РЇРєС‰Рѕ С†Рµ РѕСЃС‚Р°РЅРЅС–Р№ РµР»РµРјРµРЅС‚ Сѓ СЃРїРёСЃРєСѓ вЂ” Р·Р°РєСЂРёРІР°С”РјРѕ РіС–Р»РєСѓ
+                        # Якщо це останній елемент у списку — закриваємо гілку
                         if i == len(available_classes) - 1:
-                            classes_str += f"в”” {cls_text}\n"
-                        # РЈСЃС–Рј С–РЅС€РёРј СЃС‚Р°РІРёРјРѕ РїСЂРѕРјС–Р¶РЅСѓ РіС–Р»РєСѓ
+                            classes_str += f"└ {cls_text}\n"
+                        # Усім іншим ставимо проміжну гілку
                         else:
-                            classes_str += f"в”њ {cls_text}\n"
+                            classes_str += f"├ {cls_text}\n"
                     
                 revenue_tickets = int(f.get("result", {}).get("revenue", {}).get("tickets", 0))
                 total_expenses = int(f.get("result", {}).get("totals", {}).get("expenses", 0))
@@ -1538,50 +1538,50 @@ async def on_interaction(interaction):
                 cargo_unit_price = int(t.get("prices", {}).get("cargoUnitPrice", 0))
                 
                 if is_uk:
-                    cargo_ext_str = f"в•° Р—Р°РІР°РЅС‚Р°Р¶РµРЅС–СЃС‚СЊ РѕР±'С”РјСѓ: {cargo_actual_pax_flight} / {cargo_cap} РѕРґРёРЅРёС†СЊ ({cargo_load_factor}%), (РўР°СЂРёС„: {cargo_unit_price} $ / РѕРґ.)" if cargo_cap > 0 and cargo_actual_pax_flight > 0 else ""
+                    cargo_ext_str = f"╰ Завантаженість об'єму: {cargo_actual_pax_flight} / {cargo_cap} одиниць ({cargo_load_factor}%), (Тариф: {cargo_unit_price} $ / од.)" if cargo_cap > 0 and cargo_actual_pax_flight > 0 else ""
                 else:
-                    cargo_ext_str = f"в•° Volume Load: {cargo_actual_pax_flight} / {cargo_cap} units ({cargo_load_factor}%), (Rate: {cargo_unit_price} $ / unit)" if cargo_cap > 0 and cargo_actual_pax_flight > 0 else ""
+                    cargo_ext_str = f"╰ Volume Load: {cargo_actual_pax_flight} / {cargo_cap} units ({cargo_load_factor}%), (Rate: {cargo_unit_price} $ / unit)" if cargo_cap > 0 and cargo_actual_pax_flight > 0 else ""
                 
                 if is_uk:
                     payload_desc = (
-                        f"рџ‘Ґ **Р—Р°РІР°РЅС‚Р°Р¶РµРЅС–СЃС‚СЊ:** {pax_actual} / {pax_cap} ({load_factor}%)\n\n"
-                        f"рџ’є **РџР°СЃР°Р¶РёСЂРё РїРѕ РєР»Р°СЃР°С…:**\n{classes_str}\n"
-                        f"рџ“‰ **Р•РєРѕРЅРѕРјС–РєР° РЅР° 1 РїР°СЃР°Р¶РёСЂР°:**\n"
-                        f"в”њ рџ’µ Р”РѕС…С–Рґ: {rev_per_pax} $ | рџ§ѕ Р’РёС‚СЂР°С‚Рё: {exp_per_pax} $\n"
-                        f"в”” рџ’° Р§РёСЃС‚РёР№ РїСЂРёР±СѓС‚РѕРє: {prof_per_pax} $\n\n"
-                        f"рџ“¦ **РљРѕРјРµСЂС†С–Р№РЅРёР№ РІР°РЅС‚Р°Р¶:** {cargo_rev:,} $\n".replace(",", " ") +
+                        f"👥 **Завантаженість:** {pax_actual} / {pax_cap} ({load_factor}%)\n\n"
+                        f"💺 **Пасажири по класах:**\n{classes_str}\n"
+                        f"📉 **Економіка на 1 пасажира:**\n"
+                        f"├ 💵 Дохід: {rev_per_pax} $ | 🧾 Витрати: {exp_per_pax} $\n"
+                        f"└ 💰 Чистий прибуток: {prof_per_pax} $\n\n"
+                        f"📦 **Комерційний вантаж:** {cargo_rev:,} $\n".replace(",", " ") +
                         cargo_ext_str
                     )
-                    embed_payload = discord.Embed(title="рџЋ« РЎРўРђРўРРЎРўРРљРђ РџРђРЎРђР–РР Р†Р’ РўРђ РљРћРњР•Р Р¦Р†Р‡", description=payload_desc, color=0x3498db)
+                    embed_payload = discord.Embed(title="🎫 СТАТИСТИКА ПАСАЖИРІВ ТА КОМЕРЦІЇ", description=payload_desc, color=0x3498db)
                 else:
                     payload_desc = (
-                        f"рџ‘Ґ **Load Factor:** {pax_actual} / {pax_cap} ({load_factor}%)\n\n"
-                        f"рџ’є **Passengers by Class:**\n{classes_str}\n"
-                        f"рџ“‰ **Economics per Passenger:**\n"
-                        f"в”њ рџ’µ Revenue: {rev_per_pax} $ | рџ§ѕ Expenses: {exp_per_pax} $\n"
-                        f"в”” рџ’° Net Profit: {prof_per_pax} $\n\n"
-                        f"рџ“¦ **Commercial Cargo:** {cargo_rev:,} $\n".replace(",", " ") +
+                        f"👥 **Load Factor:** {pax_actual} / {pax_cap} ({load_factor}%)\n\n"
+                        f"💺 **Passengers by Class:**\n{classes_str}\n"
+                        f"📉 **Economics per Passenger:**\n"
+                        f"├ 💵 Revenue: {rev_per_pax} $ | 🧾 Expenses: {exp_per_pax} $\n"
+                        f"└ 💰 Net Profit: {prof_per_pax} $\n\n"
+                        f"📦 **Commercial Cargo:** {cargo_rev:,} $\n".replace(",", " ") +
                         cargo_ext_str
                     )
-                    embed_payload = discord.Embed(title="рџЋ« PASSENGER & COMMERCIAL STATS", description=payload_desc, color=0x3498db)
+                    embed_payload = discord.Embed(title="🎫 PASSENGER & COMMERCIAL STATS", description=payload_desc, color=0x3498db)
 
             # ==========================================
-            # --- 3. РљРђР РўРљРђ РђР”Р’РђРќРЎР•Р” РЎРўРђРўРРЎРўРРљР ---
+            # --- 3. КАРТКА АДВАНСЕД СТАТИСТИКИ ---
             # ==========================================
             sim = str(f.get("simulator", "Unknown")).lower()
-            fps = "РќРµРІС–РґРѕРјРѕ" if is_uk else "Unknown"
+            fps = "Невідомо" if is_uk else "Unknown"
             
             violations = f.get("result", {}).get("violations", [])
             for v in violations:
                 entry = v.get("entry", {})
                 payload = entry.get("payload", {})
-                # РЁСѓРєР°С”РјРѕ FPS СЃС‚СЂРѕРіРѕ Сѓ РїРѕРґС–С— С‚РёРїСѓ "landing"
+                # Шукаємо FPS строго у події типу "landing"
                 if entry.get("type") == "landing" and "system" in payload and "fps" in payload["system"]:
                     fps = payload["system"]["fps"]
                     break
                     
-            # Р РµР·РµСЂРІРЅРёР№ РїРѕС€СѓРє (СЏРєС‰Рѕ СЂР°РїС‚РѕРј РЅРµРјР°С” Сѓ violations, Р°Р»Рµ С” РІ РїСЂСЏРјРѕРјСѓ РѕР±'С”РєС‚С– landing)
-            if fps in ["РќРµРІС–РґРѕРјРѕ", "Unknown"] and "landing" in f:
+            # Резервний пошук (якщо раптом немає у violations, але є в прямому об'єкті landing)
+            if fps in ["Невідомо", "Unknown"] and "landing" in f:
                 if "system" in f["landing"] and "fps" in f["landing"]["system"]:
                     fps = f["landing"]["system"]["fps"]
             
@@ -1599,11 +1599,11 @@ async def on_interaction(interaction):
             time_accel = float(scalars.get("timeAcceleration", 1.0))
             
             def fmt_sc(val, uk):
-                if val >= 1.0: return "Р‘РµР· Р·РЅРёР¶РєРё" if uk else "No discount"
+                if val >= 1.0: return "Без знижки" if uk else "No discount"
                 diff = int(round((1.0 - val) * 100))
-                return f"-{diff}% РґРѕ Р·Р±РѕСЂС–РІ" if uk else f"-{diff}% to fees"
+                return f"-{diff}% до зборів" if uk else f"-{diff}% to fees"
             def fmt_sc_g(val, uk):
-                if val >= 1.0: return "Р‘РµР· Р·РЅРёР¶РєРё" if uk else "No discount"
+                if val >= 1.0: return "Без знижки" if uk else "No discount"
                 diff = int(round((1.0 - val) * 100))
                 return f"-{diff}%"
             
@@ -1615,60 +1615,60 @@ async def on_interaction(interaction):
                     title = v.get("title", "Unknown violation").replace("<br/>", " ")
                     rating_penalty = points / 100.0
                     if is_uk:
-                        penalties_str += f"в”њ **{title}**\nв”” вћ– РЁС‚СЂР°С„: `{rating_penalty:.2f} СЂРµР№С‚РёРЅРіСѓ` | `-${abs(cash)}`\n"
+                        penalties_str += f"├ **{title}**\n└ ➖ Штраф: `{rating_penalty:.2f} рейтингу` | `-${abs(cash)}`\n"
                     else:
-                        penalties_str += f"в”њ **{title}**\nв”” вћ– Penalty: `{rating_penalty:.2f} rating` | `-${abs(cash)}`\n"
+                        penalties_str += f"├ **{title}**\n└ ➖ Penalty: `{rating_penalty:.2f} rating` | `-${abs(cash)}`\n"
                         
             if not penalties_str:
-                penalties_str = "в”” вњ… РЁС‚СЂР°С„С–РІ РЅРµРјР°С”! Р†РґРµР°Р»СЊРЅРёР№ РїРѕР»С–С‚." if is_uk else "в”” вњ… No penalties! Perfect flight."
+                penalties_str = "└ ✅ Штрафів немає! Ідеальний політ." if is_uk else "└ ✅ No penalties! Perfect flight."
                 
             if is_uk:
                 adv_desc = (
-                    f"рџ–ҐпёЏ **РўРµС…РЅС–С‡РЅР° С–РЅС„РѕСЂРјР°С†С–СЏ:**\n"
-                    f"в”њ рџ•№пёЏ РЎРёРјСѓР»СЏС‚РѕСЂ: {sim}\n"
-                    f"в”” рџ“€ FPS РЅР° РїРѕСЃР°РґС†С–: {fps}\n\n"
-                    f"рџ’ё **Р”РµС‚Р°Р»С–Р·Р°С†С–СЏ РІРёС‚СЂР°С‚:**\n"
-                    f"в”њ вњ€пёЏ Р›С–С‚Р°Рє: {ac_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ›ўпёЏ РџР°Р»РёРІРѕ: {fuel_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ§і РҐРµРЅРґР»С–РЅРі: {hand_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ›¬ РџРѕСЃР°РґРєРѕРІРёР№ Р·Р±С–СЂ: {land_cost:,} $\n".replace(",", " ") +
-                    f"в”” рџ§ѕ Р’СЃСЊРѕРіРѕ РІРёС‚СЂР°С‚: {total_exp:,} $\n\n".replace(",", " ") +
-                    f"рџЏ·пёЏ **Р•РєРѕРЅРѕРјС–С‡РЅС– РєРѕРµС„С–С†С–С”РЅС‚Рё:**\n"
-                    f"в”њ рџ›« Р’РёР»С–С‚: {dep_sc} ({fmt_sc(dep_sc, True)})\n"
-                    f"в”њ рџ›¬ РџСЂРёР»С–С‚: {arr_sc} ({fmt_sc(arr_sc, True)})\n"
-                    f"в”њ рџљњ РќР°Р·РµРјРЅРµ РѕР±СЃР»СѓРіРѕРІСѓРІР°РЅРЅСЏ: {gnd_sc} ({fmt_sc_g(gnd_sc, True)})\n"
-                    f"в”њ в›Ѕ РџР°Р»РёРІРѕ: {fuel_sc} ({fmt_sc_g(fuel_sc, True)})\n"
-                    f"в”” вЏ±пёЏ РџСЂРёСЃРєРѕСЂРµРЅРЅСЏ С‡Р°СЃСѓ (timeAcceleration): {time_accel}\n\n"
-                    f"рџљЁ **РЁС‚СЂР°С„Рё С‚Р° РџРѕСЂСѓС€РµРЅРЅСЏ:**\n"
+                    f"🖥️ **Технічна інформація:**\n"
+                    f"├ 🕹️ Симулятор: {sim}\n"
+                    f"└ 📈 FPS на посадці: {fps}\n\n"
+                    f"💸 **Деталізація витрат:**\n"
+                    f"├ ✈️ Літак: {ac_cost:,} $\n".replace(",", " ") +
+                    f"├ 🛢️ Паливо: {fuel_cost:,} $\n".replace(",", " ") +
+                    f"├ 🧳 Хендлінг: {hand_cost:,} $\n".replace(",", " ") +
+                    f"├ 🛬 Посадковий збір: {land_cost:,} $\n".replace(",", " ") +
+                    f"└ 🧾 Всього витрат: {total_exp:,} $\n\n".replace(",", " ") +
+                    f"🏷️ **Економічні коефіцієнти:**\n"
+                    f"├ 🛫 Виліт: {dep_sc} ({fmt_sc(dep_sc, True)})\n"
+                    f"├ 🛬 Приліт: {arr_sc} ({fmt_sc(arr_sc, True)})\n"
+                    f"├ 🚜 Наземне обслуговування: {gnd_sc} ({fmt_sc_g(gnd_sc, True)})\n"
+                    f"├ ⛽ Паливо: {fuel_sc} ({fmt_sc_g(fuel_sc, True)})\n"
+                    f"└ ⏱️ Прискорення часу (timeAcceleration): {time_accel}\n\n"
+                    f"🚨 **Штрафи та Порушення:**\n"
                     f"{penalties_str}"
                 )
-                embed_adv = discord.Embed(title="рџ“Љ Р РѕР·С€РёСЂРµРЅР° РЎС‚Р°С‚РёСЃС‚РёРєР° Р РµР№СЃСѓ", description=adv_desc, color=0x95a5a6)
+                embed_adv = discord.Embed(title="📊 Розширена Статистика Рейсу", description=adv_desc, color=0x95a5a6)
             else:
                 adv_desc = (
-                    f"рџ–ҐпёЏ **Technical Info:**\n"
-                    f"в”њ рџ•№пёЏ Simulator: {sim}\n"
-                    f"в”” рџ“€ Landing FPS: {fps}\n\n"
-                    f"рџ’ё **Detailed Expenses:**\n"
-                    f"в”њ вњ€пёЏ Aircraft: {ac_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ›ўпёЏ Fuel: {fuel_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ§і Handling: {hand_cost:,} $\n".replace(",", " ") +
-                    f"в”њ рџ›¬ Landing: {land_cost:,} $\n".replace(",", " ") +
-                    f"в”” рџ§ѕ Total Expenses: {total_exp:,} $\n\n".replace(",", " ") +
-                    f"рџЏ·пёЏ **Economic Multipliers:**\n"
-                    f"в”њ рџ›« Departure: {dep_sc} ({fmt_sc(dep_sc, False)})\n"
-                    f"в”њ рџ›¬ Arrival: {arr_sc} ({fmt_sc(arr_sc, False)})\n"
-                    f"в”њ рџљњ Ground Handling: {gnd_sc} ({fmt_sc_g(gnd_sc, False)})\n"
-                    f"в”њ в›Ѕ Fuel: {fuel_sc} ({fmt_sc_g(fuel_sc, False)})\n"
-                    f"в”” вЏ±пёЏ timeAcceleration: {time_accel}\n\n"
-                    f"рџљЁ **Penalties & Violations:**\n"
+                    f"🖥️ **Technical Info:**\n"
+                    f"├ 🕹️ Simulator: {sim}\n"
+                    f"└ 📈 Landing FPS: {fps}\n\n"
+                    f"💸 **Detailed Expenses:**\n"
+                    f"├ ✈️ Aircraft: {ac_cost:,} $\n".replace(",", " ") +
+                    f"├ 🛢️ Fuel: {fuel_cost:,} $\n".replace(",", " ") +
+                    f"├ 🧳 Handling: {hand_cost:,} $\n".replace(",", " ") +
+                    f"├ 🛬 Landing: {land_cost:,} $\n".replace(",", " ") +
+                    f"└ 🧾 Total Expenses: {total_exp:,} $\n\n".replace(",", " ") +
+                    f"🏷️ **Economic Multipliers:**\n"
+                    f"├ 🛫 Departure: {dep_sc} ({fmt_sc(dep_sc, False)})\n"
+                    f"├ 🛬 Arrival: {arr_sc} ({fmt_sc(arr_sc, False)})\n"
+                    f"├ 🚜 Ground Handling: {gnd_sc} ({fmt_sc_g(gnd_sc, False)})\n"
+                    f"├ ⛽ Fuel: {fuel_sc} ({fmt_sc_g(fuel_sc, False)})\n"
+                    f"└ ⏱️ timeAcceleration: {time_accel}\n\n"
+                    f"🚨 **Penalties & Violations:**\n"
                     f"{penalties_str}"
                 )
-                embed_adv = discord.Embed(title="рџ“Љ Advanced Flight Stats", description=adv_desc, color=0x95a5a6)
+                embed_adv = discord.Embed(title="📊 Advanced Flight Stats", description=adv_desc, color=0x95a5a6)
 
             # ==========================================
-            # --- 4. Р’Р†Р”РџР РђР’Р›Р•РќРќРЇ РЎРўРђРўРРЎРўРРљР (3 Р•РњР‘Р•Р”Р Р РђР—РћРњ) ---
+            # --- 4. ВІДПРАВЛЕННЯ СТАТИСТИКИ (3 ЕМБЕДИ РАЗОМ) ---
             # ==========================================
-            # Discord РґРѕР·РІРѕР»СЏС” РїРµСЂРµРґР°С‚Рё РјР°СЃРёРІ Р· embed-С–РІ, С‚РѕРґС– РІРѕРЅРё Р±СѓРґСѓС‚СЊ СЏРє РѕРєСЂРµРјС– РІС–Р·СѓР°Р»СЊРЅС– РєР°СЂС‚РєРё
+            # Discord дозволяє передати масив з embed-ів, тоді вони будуть як окремі візуальні картки
             sent_stats_msg = await interaction.followup.send(embeds=[embed_fuel, embed_payload, embed_adv], ephemeral=True)
             
             async def delete_stats_msg():
@@ -1677,7 +1677,7 @@ async def on_interaction(interaction):
                 except: pass
             client.loop.create_task(delete_stats_msg())
 
-                        # 5. РќРђР”РЎРР›РђР„РњРћ Р›РћР“ РЈ РљРђРќРђР›
+                        # 5. НАДСИЛАЄМО ЛОГ У КАНАЛ
             if interaction.user.id not in ADMIN_IDS:
                 try:
                     log_channel = client.get_channel(1474817440516018186)
@@ -1686,16 +1686,16 @@ async def on_interaction(interaction):
                     user_locale = str(interaction.locale)
                     
                     log_desc = (
-                        f"рџ‘¤ **РљРѕСЂРёСЃС‚СѓРІР°С‡:** **{interaction.user.display_name}** (`{interaction.user.name}`) *(lang: {user_locale.upper()})*\n"
-                        f"рџ†” **ID Р°РєР°СѓРЅС‚Сѓ:** `{interaction.user.id}`\n"
-                        f"вњ€пёЏ **Р РµР№СЃ:** {flight_cs}\n"
-                        f"рџ”— **РџРѕРІС–РґРѕРјР»РµРЅРЅСЏ:** [РџРµСЂРµР№С‚Рё РґРѕ Р·РІС–С‚Сѓ]({msg_url})\n"
-                        f"рџ”Ќ **Р”С–СЏ:** РџРµСЂРµРіР»СЏРЅСѓРІ СЃС‚Р°С‚РёСЃС‚РёРєСѓ."
+                        f"👤 **Користувач:** **{interaction.user.display_name}** (`{interaction.user.name}`) *(lang: {user_locale.upper()})*\n"
+                        f"🆔 **ID акаунту:** `{interaction.user.id}`\n"
+                        f"✈️ **Рейс:** {flight_cs}\n"
+                        f"🔗 **Повідомлення:** [Перейти до звіту]({msg_url})\n"
+                        f"🔍 **Дія:** Переглянув статистику."
                     )
-                    log_embed = discord.Embed(title="рџ”” Р›РѕРі РЅР°С‚РёСЃРєР°РЅРЅСЏ РєРЅРѕРїРєРё", description=log_desc, color=0x3498db)
+                    log_embed = discord.Embed(title="🔔 Лог натискання кнопки", description=log_desc, color=0x3498db)
                     await log_channel.send(embed=log_embed)
                 except Exception as e:
-                    print(f"РџРѕРјРёР»РєР° РІС–РґРїСЂР°РІРєРё Р»РѕРіСѓ РІ РєР°РЅР°Р»: {e}")
+                    print(f"Помилка відправки логу в канал: {e}")
 					
 # -----------------------------------------------------------------
 
@@ -1705,28 +1705,28 @@ async def on_message(message):
     
     if message.author == client.user: return
 
-	# --- рџҐ· Р¤Р†Р›Р¬РўР : РњРРўРўР„Р’Р• Р’РР”РђР›Р•РќРќРЇ РџРћР’Р†Р”РћРњР›Р•РќР¬ Р’Р†Р” РџР РРҐРћР’РђРќРРҐ Р®Р—Р•Р Р†Р’ ---
-    # РџРµСЂРµРІРѕРґРёРјРѕ ID РєР°РЅР°Р»Сѓ РІ С‚РµРєСЃС‚, Р±Рѕ JSON Р·Р±РµСЂС–РіР°С” РєР»СЋС‡С– СЏРє С‚РµРєСЃС‚
+	# --- 🥷 ФІЛЬТР: МИТТЄВЕ ВИДАЛЕННЯ ПОВІДОМЛЕНЬ ВІД ПРИХОВАНИХ ЮЗЕРІВ ---
+    # Переводимо ID каналу в текст, бо JSON зберігає ключі як текст
     ch_id_str = str(message.channel.id) 
     if ch_id_str in HIDDEN_USERS and message.author.id in HIDDEN_USERS[ch_id_str]:
         try:
             await message.delete()
         except:
-            pass # РЇРєС‰Рѕ РІ Р±РѕС‚Р° РЅРµРјР°С” РїСЂР°РІ РЅР° РІРёРґР°Р»РµРЅРЅСЏ вЂ” С–РіРЅРѕСЂСѓС”РјРѕ
-        return # Р—СѓРїРёРЅСЏС”РјРѕ РїРѕРґР°Р»СЊС€Сѓ РѕР±СЂРѕР±РєСѓ
+            pass # Якщо в бота немає прав на видалення — ігноруємо
+        return # Зупиняємо подальшу обробку
     # ------------------------------------------------------------------------
 
-    # --- рџ•µпёЏ РџР•Р Р•РҐРћРџР›Р•РќРќРЇ РџРџ ---
+    # --- 🕵️ ПЕРЕХОПЛЕННЯ ПП ---
     if isinstance(message.channel, discord.DMChannel):
         if message.author.id in ADMIN_IDS:
             pass
         else:
             try:
                 owner = await client.fetch_user(ADMIN_IDS[0])
-                # Р”РѕРґР°РІ ID, С‰РѕР± С‚РѕР±С– Р±СѓР»Рѕ Р·СЂСѓС‡РЅРѕ РєРѕРїС–СЋРІР°С‚Рё РґР»СЏ РєРѕРјР°РЅРґРё !pmsg
-                await owner.send(f"рџ’¬ **РќРѕРІРµ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ РІ РџРџ РІС–Рґ {message.author.display_name} (`{message.author.name}`)**\nрџ†” ID: `{message.author.id}`\n\n{message.content}")
+                # Додав ID, щоб тобі було зручно копіювати для команди !pmsg
+                await owner.send(f"💬 **Нове повідомлення в ПП від {message.author.display_name} (`{message.author.name}`)**\n🆔 ID: `{message.author.id}`\n\n{message.content}")
                 
-                # РЇРєС‰Рѕ РєРѕСЂРёСЃС‚СѓРІР°С‡ РЅР°РґС–СЃР»Р°РІ С„Р°Р№Р»Рё/РєР°СЂС‚РёРЅРєРё, Р±РѕС‚ РїРµСЂРµС€Р»Рµ С—С… С‚РѕР±С–
+                # Якщо користувач надіслав файли/картинки, бот перешле їх тобі
                 if message.attachments:
                     files_to_forward = [await att.to_file() for att in message.attachments]
                     await owner.send(files=files_to_forward)
@@ -1737,88 +1737,89 @@ async def on_message(message):
     if message.author.id in ADMIN_IDS:
         is_admin = True
     else:
-        # 1. РЇРєС‰Рѕ РїРёС€СѓС‚СЊ РїСЂСЏРјРѕ РЅР° СЃРµСЂРІРµСЂС–
+        # 1. Якщо пишуть прямо на сервері
         if message.guild and message.author.guild_permissions.administrator:
             is_admin = True
-        # 2. РЇРєС‰Рѕ РїРёС€СѓС‚СЊ Сѓ РџРџ, РїРµСЂРµРІС–СЂСЏС”РјРѕ С—С…РЅС– РїСЂР°РІР° РЅР° РіРѕР»РѕРІРЅРѕРјСѓ СЃРµСЂРІРµСЂС–
+        # 2. Якщо пишуть у ПП, перевіряємо їхні права на головному сервері
         elif not message.guild:
             main_channel = client.get_channel(CHANNEL_ID)
             if main_channel and main_channel.guild:
                 try:
-                    # РЁСѓРєР°С”РјРѕ С†СЊРѕРіРѕ РєРѕСЂРёСЃС‚СѓРІР°С‡Р° РЅР° СЃРµСЂРІРµСЂС–
+                    # Шукаємо цього користувача на сервері
                     member = main_channel.guild.get_member(message.author.id)
-                    if not member: # РЇРєС‰Рѕ Р№РѕРіРѕ РЅРµРјР°С” РІ РєРµС€С–, СЂРѕР±РёРјРѕ Р·Р°РїРёС‚
+                    if not member: # Якщо його немає в кеші, робимо запит
                         member = await main_channel.guild.fetch_member(message.author.id)
                         
                     if member and member.guild_permissions.administrator:
                         is_admin = True
                 except:
                     pass
+    
 
-    # --- рџҐџ РљРћРњРђРќР”Рђ: !topsync (СЂСѓС‡РЅРёР№ Р·Р°РїСѓСЃРє top-pool + guaranteed bonuses) ---
+    # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
     if message.content.strip().lower() == "!topsync":
         if not is_admin:
-            return await message.channel.send("рџљ« **Access Denied**")
+            return await message.channel.send("Access Denied")
 
-        status_msg = await message.channel.send("рџҐџ **Р—Р°РїСѓСЃРєР°СЋ СЂСѓС‡РЅРёР№ Top/Bonus Sync...**\nРЎРєР°С‡СѓСЋ Р±РѕР№РѕРІС– С„Р°Р№Р»Рё Р· GitHub С– С„РѕСЂРјСѓСЋ РЅРѕРІРёР№ РїСѓР».")
+        status_msg = await message.channel.send("TOPSYNC: manual run started. Downloading GitHub files and building top pool...")
         try:
             async with GITHUB_DB_LOCK:
                 async with aiohttp.ClientSession() as session:
                     files_to_push = await run_top_bonus_pipeline(session, ctx=message.channel)
                     if files_to_push is None:
-                        return await status_msg.edit(content="вќЊ **Top/Bonus Sync РЅРµ РІРёРєРѕРЅР°РІСЃСЏ.** Р”РёРІРёСЃСЊ Railway logs: РЅР°Р№С‡Р°СЃС‚С–С€Рµ РїСЂРёС‡РёРЅР° вЂ” РЅРµРјР°С” Node.js Р°Р±Рѕ РЅРµ СЃРєР°С‡Р°РІСЃСЏ РїРѕС‚СЂС–Р±РЅРёР№ С„Р°Р№Р» Р· GitHub.")
+                        return await status_msg.edit(content="ERROR: Top/Bonus Sync did not finish. Check the detailed message above and Railway logs.")
                     if not files_to_push:
-                        return await status_msg.edit(content="вњ… **Top/Bonus Sync Р·Р°РІРµСЂС€РµРЅРѕ:** Р·РјС–РЅ РґР»СЏ GitHub РЅРµРјР°С”.")
+                        return await status_msg.edit(content="OK: Top/Bonus Sync finished. No GitHub changes.")
 
-                    summary = "\n".join(f"вЂў `{path}`" for path in files_to_push.keys())
+                    summary = "\n".join(f"- `{path}`" for path in files_to_push.keys())
                     if len(summary) > 1500:
-                        summary = summary[:1500] + "\nвЂў ..."
-                    await status_msg.edit(content=f"рџ“¦ **Top/Bonus Sync СЃС„РѕСЂРјСѓРІР°РІ {len(files_to_push)} С„Р°Р№Р»С–РІ:**\n{summary}\n\nвЏі РџСѓС€Сѓ РѕРґРЅРёРј РєРѕРјС–С‚РѕРј...")
+                        summary = summary[:1500] + "\n- ..."
+                    await status_msg.edit(content=f"TOPSYNC: generated {len(files_to_push)} files:\n{summary}\n\nPushing one GitHub commit...")
 
-                    success = await push_to_github_batch(session, files_to_push, "рџҐџ Manual Top/Bonus Sync")
+                    success = await push_to_github_batch(session, files_to_push, "Manual Top/Bonus Sync")
                     if success:
-                        await status_msg.edit(content=f"вњ… **Top/Bonus Sync СѓСЃРїС–С€РЅРѕ Р·Р°РїРёСЃР°РЅРѕ РЅР° GitHub.**\nРћРЅРѕРІР»РµРЅРѕ С„Р°Р№Р»С–РІ: **{len(files_to_push)}**\n{summary}")
+                        await status_msg.edit(content=f"OK: Top/Bonus Sync pushed to GitHub. Updated files: {len(files_to_push)}\n{summary}")
                     else:
-                        await status_msg.edit(content="вќЊ **Top/Bonus Sync СЃС„РѕСЂРјСѓРІР°РІ С„Р°Р№Р»Рё, Р°Р»Рµ GitHub push РЅРµ РІРґР°РІСЃСЏ.** Р”РёРІРёСЃСЊ Railway logs.")
+                        await status_msg.edit(content="ERROR: Top/Bonus Sync generated files, but GitHub push failed. Check Railway logs.")
         except Exception as e:
-            print(f"вќЊ !topsync error: {e}")
-            await status_msg.edit(content=f"вќЊ **Top/Bonus Sync error:** `{str(e)[:1500]}`")
+            print(f"TOPSYNC_ERROR: {e}")
+            await status_msg.edit(content=f"ERROR: Top/Bonus Sync exception: `{str(e)[:1500]}`")
         return
-    
-    # --- рџ“Ґ РљРћРњРђРќР”Рђ: !cache (РЎРљРђР§РђРўР Р’РЎР† Р¤РђР™Р›Р РџРђРњ'РЇРўР†) ---
+
+    # --- 📥 КОМАНДА: !cache (СКАЧАТИ ВСІ ФАЙЛИ ПАМ'ЯТІ) ---
     if message.content == "!cache":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         folder_path = Path("/app/data")
         if not folder_path.exists():
-            return await message.channel.send("вљ пёЏ **Р”Р°РЅС– С‰Рµ РЅРµ СЃС‚РІРѕСЂРµРЅС–.**")
+            return await message.channel.send("⚠️ **Дані ще не створені.**")
             
         files_to_send = []
-        # РџСЂРѕС…РѕРґРёРјРѕСЃСЏ РїРѕ РІСЃС–С… С„Р°Р№Р»Р°С… Сѓ РїР°РїС†С– /app/data
+        # Проходимося по всіх файлах у папці /app/data
         for file in folder_path.iterdir():
             if file.is_file() and file.name.endswith(".json") and file.stat().st_size > 0:
                 files_to_send.append(discord.File(file))
                 
         if not files_to_send:
-            return await message.channel.send("вљ пёЏ **Р¤Р°Р№Р»Рё РєРµС€Сѓ РїРѕСЂРѕР¶РЅС– Р°Р±Рѕ РІС–РґСЃСѓС‚РЅС–.**")
+            return await message.channel.send("⚠️ **Файли кешу порожні або відсутні.**")
             
         await message.channel.send(
-            content="рџ“‚ **Р’СЃС– С„Р°Р№Р»Рё РїР°Рј'СЏС‚С– Р±РѕС‚Р°:**", 
-            files=files_to_send[:10] # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РІСЃС– Р·РЅР°Р№РґРµРЅС– С„Р°Р№Р»Рё (РґРѕ 10 С€С‚.)
+            content="📂 **Всі файли пам'яті бота:**", 
+            files=files_to_send[:10] # Відправляємо всі знайдені файли (до 10 шт.)
         )
         return
 
 #  -------------------------------------------------------------
 
-# --- рџЊЌ РљРћРњРђРќР”Рђ: !syncall (Р РћР—РЈРњРќРР™ Р•РљРЎРџРћР Рў Р— РџР†Р”РўР’Р•Р Р”Р–Р•РќРќРЇРњ Р”Р›РЇ Р’РЎР†РҐ РўРР–РќР†Р’) ---
+# --- 🌍 КОМАНДА: !syncall (РОЗУМНИЙ ЕКСПОРТ З ПІДТВЕРДЖЕННЯМ ДЛЯ ВСІХ ТИЖНІВ) ---
     if message.content.startswith("!syncall"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        status_msg = await message.channel.send("вЏі **Р—Р°РїСѓСЃРє СЂРѕР·СѓРјРЅРѕС— РіР»РёР±РѕРєРѕС— СЃРёРЅС…СЂРѕРЅС–Р·Р°С†С–С—...** Р’РёРєР°С‡СѓСЋ РІСЃС– СЂРµР№СЃРё РґРѕ РґРЅР°.")
+        status_msg = await message.channel.send("⏳ **Запуск розумної глибокої синхронізації...** Викачую всі рейси до дна.")
         
         try:
             async with aiohttp.ClientSession() as session:
-                # 1. Р’РёРєР°С‡СѓС”РјРѕ РІСЃС– СЂРµР№СЃРё (Р· Р°РЅС‚Рё-Р»С–РјС–С‚РѕРј)
+                # 1. Викачуємо всі рейси (з анти-лімітом)
                 flights_list = []
                 skip_count = 0
                 batch_size = 100
@@ -1826,37 +1827,37 @@ async def on_message(message):
                 
                 while True:
                     if retry_count == 0:
-                        await status_msg.edit(content=f"вЏі Р—Р°РІР°РЅС‚Р°Р¶СѓСЋ Р· Newsky (Р·РјС–С‰РµРЅРЅСЏ: {skip_count})...")
+                        await status_msg.edit(content=f"⏳ Завантажую з Newsky (зміщення: {skip_count})...")
                         
                     body = {"count": batch_size, "skip": skip_count, "start": "2026-01-01T00:00:00Z"}
                     recent = await fetch_api(session, "/flights/recent", method="POST", body=body)
                     
-                    # РЇРєС‰Рѕ Newsky Р·Р°Р±Р»РѕРєСѓРІР°РІ Р·Р°РїРёС‚ (429 Р»С–РјС–С‚), С‡РµРєР°С”РјРѕ 5 СЃРµРє С– РїСЂРѕР±СѓС”РјРѕ Р·РЅРѕРІСѓ
+                    # Якщо Newsky заблокував запит (429 ліміт), чекаємо 5 сек і пробуємо знову
                     if recent is None:
                         retry_count += 1
                         if retry_count > 5:
-                            await status_msg.edit(content=f"вќЊ **Р—СѓРїРёРЅРєР°:** API Newsky РЅРµ РІС–РґРїРѕРІС–РґР°С” РїС–СЃР»СЏ 5 СЃРїСЂРѕР±. Р’Р¶Рµ РІРёРєР°С‡Р°РЅРѕ {len(flights_list)} СЂРµР№СЃС–РІ.")
+                            await status_msg.edit(content=f"❌ **Зупинка:** API Newsky не відповідає після 5 спроб. Вже викачано {len(flights_list)} рейсів.")
                             break
                         await asyncio.sleep(5)
                         continue
                         
-                    retry_count = 0 # РЈСЃРїС–С…! РЎРєРёРґР°С”РјРѕ Р»С–С‡РёР»СЊРЅРёРє
+                    retry_count = 0 # Успіх! Скидаємо лічильник
                     
                     if "results" not in recent or not recent["results"]: 
-                        break # РЎРїСЂР°РІР¶РЅС” РґРЅРѕ СЃРїРёСЃРєСѓ
+                        break # Справжнє дно списку
                         
                     flights_list.extend(recent["results"])
                     if len(recent["results"]) < batch_size: 
-                        break # РњРµРЅС€Рµ 100 СЂРµР№СЃС–РІ вЂ” С†Рµ РѕСЃС‚Р°РЅРЅСЏ СЃС‚РѕСЂС–РЅРєР°
+                        break # Менше 100 рейсів — це остання сторінка
                         
                     skip_count += batch_size
                     
                 if not flights_list:
-                    return await status_msg.edit(content="вњ… **Р РµР№СЃС–РІ РЅРµ Р·РЅР°Р№РґРµРЅРѕ.**")
+                    return await status_msg.edit(content="✅ **Рейсів не знайдено.**")
 
-                await status_msg.edit(content=f"вЏі **Р—РЅР°Р№РґРµРЅРѕ {len(flights_list)} СЂРµР№СЃС–РІ. Р§РёС‚Р°СЋ Р±Р°Р·Сѓ GitHub...**")
+                await status_msg.edit(content=f"⏳ **Знайдено {len(flights_list)} рейсів. Читаю базу GitHub...**")
                 
-                # 2. Р§РёС‚Р°С”РјРѕ СЃРїРёСЃРѕРє С„Р°Р№Р»С–РІ Р· GitHub
+                # 2. Читаємо список файлів з GitHub
                 gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json", "Cache-Control": "no-cache"}
                 dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/FLIGHTS?t={int(time.time())}"
                 
@@ -1867,12 +1868,12 @@ async def on_message(message):
                             if item.get("name", "").endswith(".json"):
                                 github_files[item["name"]] = item["sha"]
 
-                # 3. Р“СЂСѓРїСѓС”РјРѕ СЂРµР№СЃРё С‚Р° С€СѓРєР°С”РјРѕ РІС–РґСЃСѓС‚РЅС–
+                # 3. Групуємо рейси та шукаємо відсутні
                 ignored_list = load_ignored()
                 missing_flights = []
                 flights_list.sort(key=lambda x: x.get("updatedAt", ""))
                 
-                # РљРµС€ РґР»СЏ РІР¶Рµ Р·Р°РІР°РЅС‚Р°Р¶РµРЅРёС… С„Р°Р№Р»С–РІ С‚РёР¶РЅС–РІ
+                # Кеш для вже завантажених файлів тижнів
                 loaded_weeks = {}
                 
                 valid_count = 0
@@ -1885,7 +1886,7 @@ async def on_message(message):
                     week_tag = get_iso_week(arrival_time)
                     week_filename = f"{week_tag}.json"
                     
-                    # Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ С„Р°Р№Р» С‚РёР¶РЅСЏ Р· GitHub, СЏРєС‰Рѕ С‰Рµ РЅРµ Р·Р°РІР°РЅС‚Р°Р¶РёР»Рё
+                    # Завантажуємо файл тижня з GitHub, якщо ще не завантажили
                     if week_filename not in loaded_weeks:
                         loaded_weeks[week_filename] = []
                         if week_filename in github_files:
@@ -1895,7 +1896,7 @@ async def on_message(message):
                                     blob_data = await blob_resp.json()
                                     loaded_weeks[week_filename] = json.loads(base64.b64decode(blob_data['content']).decode('utf-8'))
                     
-                    # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С” СЂРµР№СЃ Сѓ С†СЊРѕРјСѓ С„Р°Р№Р»С–
+                    # Перевіряємо, чи є рейс у цьому файлі
                     already_exists = any(
                         str(f.get("_id")) == fid or str(f.get("id")) == fid 
                         for p in loaded_weeks[week_filename] for f in p.get("flights", [])
@@ -1908,34 +1909,34 @@ async def on_message(message):
                             
                     valid_count += 1
                     if valid_count % 50 == 0:
-                        await status_msg.edit(content=f"вЏі **Р—РІС–СЂСЏСЋ Р· GitHub... РћР±СЂРѕР±Р»РµРЅРѕ {valid_count}/{len(flights_list)} СЂРµР№СЃС–РІ. Р—РЅР°Р№РґРµРЅРѕ РїСЂРѕРїСѓС‰РµРЅРёС…: {len(missing_flights)}**")
+                        await status_msg.edit(content=f"⏳ **Звіряю з GitHub... Оброблено {valid_count}/{len(flights_list)} рейсів. Знайдено пропущених: {len(missing_flights)}**")
 
                 if not missing_flights:
-                    return await status_msg.edit(content="вњ… **РЈСЃС– СЂРµР№СЃРё Р·Р° РІСЃС– С‚РёР¶РЅС– РІР¶Рµ РЅР° GitHub!** Р’С–РґСЃСѓС‚РЅС–С… СЂРµР№СЃС–РІ РЅРµРјР°С”.")
+                    return await status_msg.edit(content="✅ **Усі рейси за всі тижні вже на GitHub!** Відсутніх рейсів немає.")
 
-                # 4. РџРѕРєР°Р·СѓС”РјРѕ СЃРїРёСЃРѕРє Р’РЎР†РҐ СЂРµР№СЃС–РІ (Р· СЂРѕР·СѓРјРЅРёРј СЂРѕР·Р±РёС‚С‚СЏРј РЅР° РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ)
-                header = f"рџ“‹ **РњР°СЋ РґРѕРґР°С‚Рё РѕСЃСЊ С‚Р°РєС– СЂРµР№СЃРё ({len(missing_flights)} С€С‚):**\n"
+                # 4. Показуємо список ВСІХ рейсів (з розумним розбиттям на повідомлення)
+                header = f"📋 **Маю додати ось такі рейси ({len(missing_flights)} шт):**\n"
                 chunks = []
                 current_chunk = header
                 
                 for w_tag, mf in missing_flights:
                     fid = mf.get("_id") or mf.get("id")
                     cs = mf.get("flightNumber") or mf.get("callsign") or "Unknown"
-                    line = f"вњ€пёЏ [{cs}](https://newsky.app/flight/{fid}) (РўРёР¶РґРµРЅСЊ {w_tag})\n"
+                    line = f"✈️ [{cs}](https://newsky.app/flight/{fid}) (Тиждень {w_tag})\n"
                     
-                    # Р›С–РјС–С‚ Discord - 2000 СЃРёРјРІРѕР»С–РІ, РјРё Р±РµСЂРµРјРѕ С–Р· Р·Р°РїР°СЃРѕРј 1900
+                    # Ліміт Discord - 2000 символів, ми беремо із запасом 1900
                     if len(current_chunk) + len(line) > 1900:
                         chunks.append(current_chunk)
                         current_chunk = line
                     else:
                         current_chunk += line
                 
-                current_chunk += "\nвњЌпёЏ РќР°РїРёС€Рё `yes` С‰РѕР± РїС–РґС‚РІРµСЂРґРёС‚Рё, Р°Р±Рѕ `no` С‰РѕР± СЃРєР°СЃСѓРІР°С‚Рё (РјР°С”С€ 180 СЃРµРєСѓРЅРґ)."
+                current_chunk += "\n✍️ Напиши `yes` щоб підтвердити, або `no` щоб скасувати (маєш 180 секунд)."
                 chunks.append(current_chunk)
 
                 await status_msg.edit(content=chunks[0], suppress=True)
                 
-                # РЇРєС‰Рѕ С€РјР°С‚РєС–РІ Р±Р°РіР°С‚Рѕ, РІС–РґРїСЂР°РІР»СЏС”РјРѕ РґРѕРґР°С‚РєРѕРІС– РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ
+                # Якщо шматків багато, відправляємо додаткові повідомлення
                 extra_msgs = []
                 for chunk in chunks[1:]:
                     msg = await message.channel.send(content=chunk, suppress_embeds=True)
@@ -1947,17 +1948,17 @@ async def on_message(message):
                 try:
                     reply = await client.wait_for('message', check=check, timeout=180.0)
                     if reply.content.lower() == 'no':
-                        return await status_msg.edit(content="вќЊ **РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЋ СЃРєР°СЃРѕРІР°РЅРѕ.**")
+                        return await status_msg.edit(content="❌ **Синхронізацію скасовано.**")
                 except asyncio.TimeoutError:
-                    return await status_msg.edit(content="вЏі **Р§Р°СЃ РІРёР№С€РѕРІ (180 СЃРµРє).** РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЋ СЃРєР°СЃРѕРІР°РЅРѕ.")
+                    return await status_msg.edit(content="⏳ **Час вийшов (180 сек).** Синхронізацію скасовано.")
                 finally:
-                    # РћС‡РёС‰Р°С”РјРѕ РґРѕРґР°С‚РєРѕРІС– РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ, С‰РѕР± РЅРµ Р·Р°СЃРјС–С‡СѓРІР°С‚Рё С‡Р°С‚
+                    # Очищаємо додаткові повідомлення, щоб не засмічувати чат
                     for msg in extra_msgs:
                         try: await msg.delete()
                         except: pass
 
-                # 5. РљРћР РРЎРўРЈР’РђР§ РџР†Р”РўР’Р•Р Р”РР’ (yes) -> Рњ'СЏСЃРѕСЂСѓР±РєР° С– Р„РґРёРЅРёР№ Batch Push
-                await status_msg.edit(content="вЏі **РџС–РґС‚РІРµСЂРґР¶РµРЅРѕ! РћР±СЂРѕР±Р»СЏСЋ СЂРµР№СЃРё С‚Р° Р·Р°РїРёСЃСѓСЋ РЅР° GitHub С”РґРёРЅРёРј РєРѕРјС–С‚РѕРј...**")
+                # 5. КОРИСТУВАЧ ПІДТВЕРДИВ (yes) -> М'ясорубка і Єдиний Batch Push
+                await status_msg.edit(content="⏳ **Підтверджено! Обробляю рейси та записую на GitHub єдиним комітом...**")
                 
                 async with GITHUB_DB_LOCK:
                     files_to_push = {}
@@ -1986,29 +1987,29 @@ async def on_message(message):
                                 "pilot_id": pilot_id, "fullname": pilot_name, "avatar": pilot_avatar, "flights": [clean_flight]
                             })
                             
-                        # Р“РѕС‚СѓС”РјРѕ С„Р°Р№Р» РґРѕ РјР°СЃРѕРІРѕРіРѕ РїСѓС€Сѓ
+                        # Готуємо файл до масового пушу
                         files_to_push[file_path] = json.dumps(file_content, ensure_ascii=False, indent=4)
                         
-                    # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ С”РґРёРЅРёРј РєРѕРјС–С‚РѕРј С‡РµСЂРµР· push_to_github_batch
-                    success = await push_to_github_batch(session, files_to_push, f"рџ¤– Auto-sync: added {len(missing_flights)} missing flights across multiple weeks")
+                    # Відправляємо єдиним комітом через push_to_github_batch
+                    success = await push_to_github_batch(session, files_to_push, f"🤖 Auto-sync: added {len(missing_flights)} missing flights across multiple weeks")
                     
                     if success:
-                        await status_msg.edit(content=f"вњ… **РЈСЃРїС–С…!** Р”РѕРґР°РЅРѕ **{len(missing_flights)}** РїСЂРѕРїСѓС‰РµРЅРёС… СЂРµР№СЃС–РІ Сѓ {len(files_to_push)} С„Р°Р№Р»С–РІ РЅР° GitHub (РѕРґРЅРёРј РєРѕРјС–С‚РѕРј).")
+                        await status_msg.edit(content=f"✅ **Успіх!** Додано **{len(missing_flights)}** пропущених рейсів у {len(files_to_push)} файлів на GitHub (одним комітом).")
                     else:
-                        await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР° РїР°РєРµС‚РЅРѕРіРѕ Р·Р°РїРёСЃСѓ РЅР° GitHub.**")
+                        await status_msg.edit(content=f"❌ **Помилка пакетного запису на GitHub.**")
 
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РЎС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР°:** {e}")
+            await status_msg.edit(content=f"❌ **Сталася помилка:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ› пёЏ РљРћРњРђРќР”Рђ: !patchnames (Р”РћР”РђРўР РўР†Р›Р¬РљР customName Р’ РЎРўРђР Р† Р¤РђР™Р›Р) ---
+	# --- 🛠️ КОМАНДА: !patchnames (ДОДАТИ ТІЛЬКИ customName В СТАРІ ФАЙЛИ) ---
     if message.content == "!patchnames":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        # РЎРїРёСЃРѕРє С„Р°Р№Р»С–РІ, СЏРєС– С‚СЂРµР±Р° РѕРїСЂР°С†СЋРІР°С‚Рё
+        # Список файлів, які треба опрацювати
         target_weeks = [f"2026-W{i:02d}.json" for i in range(2, 26)]
-        status_msg = await message.channel.send(f"вЏі **РџРѕС‡РёРЅР°СЋ РїР°С‚С‡РёРЅРі С„Р°Р№Р»С–РІ: {', '.join(target_weeks)}...**\n*(Р”РѕРґР°СЋ РўР†Р›Р¬РљР customName, РІР°С€С– СЂСѓС‡РЅС– Р·РјС–РЅРё РЅРµ С‡С–РїР°СЋ)*")
+        status_msg = await message.channel.send(f"⏳ **Починаю патчинг файлів: {', '.join(target_weeks)}...**\n*(Додаю ТІЛЬКИ customName, ваші ручні зміни не чіпаю)*")
         
         gh_headers = {
             "Authorization": f"token {GITHUB_TOKEN}",
@@ -2021,9 +2022,9 @@ async def on_message(message):
                 async with aiohttp.ClientSession() as session:
                     for week_file in target_weeks:
                         file_path = f"FLIGHTS/{week_file}"
-                        await status_msg.edit(content=f"вЏі **РћР±СЂРѕР±РєР° С„Р°Р№Р»Сѓ `{week_file}`...** (Р—Р°РІР°РЅС‚Р°Р¶РµРЅРЅСЏ Р±Р°Р·Рё Р· GitHub)")
+                        await status_msg.edit(content=f"⏳ **Обробка файлу `{week_file}`...** (Завантаження бази з GitHub)")
                         
-                        # 1. РћС‚СЂРёРјСѓС”РјРѕ SHA С„Р°Р№Р»Сѓ
+                        # 1. Отримуємо SHA файлу
                         file_sha = None
                         dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/FLIGHTS?t={int(time.time())}"
                         async with session.get(dir_url, headers=gh_headers) as dir_resp:
@@ -2036,9 +2037,9 @@ async def on_message(message):
                                             break
                                             
                         if not file_sha:
-                            continue # РЇРєС‰Рѕ С„Р°Р№Р»Сѓ РЅРµРјР°С”, РїСЂРѕСЃС‚Рѕ РїСЂРѕРїСѓСЃРєР°С”РјРѕ
+                            continue # Якщо файлу немає, просто пропускаємо
                             
-                        # 2. Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ РІРјС–СЃС‚ С„Р°Р№Р»Сѓ
+                        # 2. Завантажуємо вміст файлу
                         blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{file_sha}"
                         async with session.get(blob_url, headers=gh_headers) as blob_resp:
                             if blob_resp.status != 200: continue
@@ -2046,7 +2047,7 @@ async def on_message(message):
                             text_content = base64.b64decode(blob_data['content']).decode('utf-8')
                             file_content = json.loads(text_content)
                             
-                        # 3. РџРµСЂРµР±РёСЂР°С”РјРѕ СЂРµР№СЃРё С– РўРћР§РљРћР’Рћ РґРѕРґР°С”РјРѕ customName
+                        # 3. Перебираємо рейси і ТОЧКОВО додаємо customName
                         total_flights = sum(len(p.get("flights", [])) for p in file_content)
                         processed = 0
                         changed = False
@@ -2055,14 +2056,14 @@ async def on_message(message):
                             for f in p.get("flights", []):
                                 fid = str(f.get("_id") or f.get("id"))
                                 
-                                # Р—Р°РїРёС‚ РґРѕ Newsky С‡РёСЃС‚Рѕ С‰РѕР± РґС–СЃС‚Р°С‚Рё РЅР°Р·РІСѓ С‚Р° ID Р±РѕСЂС‚Р°
+                                # Запит до Newsky чисто щоб дістати назву та ID борта
                                 det = await fetch_api(session, f"/flight/{fid}")
                                 if det and "flight" in det:
                                     ns_flight = det["flight"]
                                     custom_name = ns_flight.get("aircraft", {}).get("name")
                                     ac_id = ns_flight.get("aircraft", {}).get("_id")
                                     
-                                    # Р®РІРµР»С–СЂРЅР° РѕРїРµСЂР°С†С–СЏ: РґРѕРґР°С”РјРѕ РїРѕР»СЏ, С–РЅС€Рµ РЅРµ С‡С–РїР°С”РјРѕ
+                                    # Ювелірна операція: додаємо поля, інше не чіпаємо
                                     if "aircraft" in f:
                                         if custom_name:
                                             f["aircraft"]["customName"] = custom_name
@@ -2073,16 +2074,16 @@ async def on_message(message):
                                         
                                 processed += 1
                                 if processed % 10 == 0:
-                                    await status_msg.edit(content=f"вЏі **РћР±СЂРѕР±РєР° С„Р°Р№Р»Сѓ `{week_file}`:** Р—РІС–СЂСЏСЋ Р· Newsky... ({processed}/{total_flights} СЂРµР№СЃС–РІ)")
+                                    await status_msg.edit(content=f"⏳ **Обробка файлу `{week_file}`:** Звіряю з Newsky... ({processed}/{total_flights} рейсів)")
                                     
-                        # 4. Р—Р±РµСЂС–РіР°С”РјРѕ С„Р°Р№Р» РЅР°Р·Р°Рґ РЅР° GitHub РѕРґРЅРёРј РїСѓС€РµРј
+                        # 4. Зберігаємо файл назад на GitHub одним пушем
                         if changed:
-                            await status_msg.edit(content=f"рџ“¤ **РћР±СЂРѕР±РєР° `{week_file}` Р·Р°РІРµСЂС€РµРЅР°! РџСѓС€Сѓ РѕРЅРѕРІР»РµРЅРёР№ С„Р°Р№Р» РЅР° GitHub...**")
+                            await status_msg.edit(content=f"📤 **Обробка `{week_file}` завершена! Пушу оновлений файл на GitHub...**")
                             new_content_str = json.dumps(file_content, ensure_ascii=False, indent=4)
                             new_content_b64 = base64.b64encode(new_content_str.encode('utf-8')).decode('utf-8')
                             
                             push_payload = {
-                                "message": f"рџ¤– Auto-patch: added customName to {week_file}",
+                                "message": f"🤖 Auto-patch: added customName to {week_file}",
                                 "content": new_content_b64,
                                 "sha": file_sha
                             }
@@ -2090,43 +2091,43 @@ async def on_message(message):
                             put_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
                             async with session.put(put_url, headers=gh_headers, json=push_payload) as put_resp:
                                 if put_resp.status not in [200, 201]:
-                                    print(f"РџРѕРјРёР»РєР° Р·Р°РїРёСЃСѓ {week_file}: {await put_resp.text()}")
+                                    print(f"Помилка запису {week_file}: {await put_resp.text()}")
                                     
-            await status_msg.edit(content="вњ… **РћРїРµСЂР°С†С–СЏ `!patchnames` СѓСЃРїС–С€РЅРѕ Р·Р°РІРµСЂС€РµРЅР°!**\nРўС–Р»СЊРєРё `customName` Р±СѓР»Рѕ РґРѕРґР°РЅРѕ, РІСЃС– РІР°С€С– СЂСѓС‡РЅС– СЂРµРґР°РіСѓРІР°РЅРЅСЏ С–РґРµР°Р»СЊРЅРѕ Р·Р±РµСЂРµР¶РµРЅС–.")
+            await status_msg.edit(content="✅ **Операція `!patchnames` успішно завершена!**\nТільки `customName` було додано, всі ваші ручні редагування ідеально збережені.")
             
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ РїР°С‚С‡РёРЅРіСѓ:** {e}")
+            await status_msg.edit(content=f"❌ **Помилка під час патчингу:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ”„ РљРћРњРђРќР”Рђ: !syncghweek (РЎРРќРҐР РћРќР†Р—РђР¦Р†РЇ Р Р•Р™РЎР†Р’ РўРР–РќРЇ Р— РџР†Р”РўР’Р•Р Р”Р–Р•РќРќРЇРњ) ---
+	# --- 🔄 КОМАНДА: !syncghweek (СИНХРОНІЗАЦІЯ РЕЙСІВ ТИЖНЯ З ПІДТВЕРДЖЕННЯМ) ---
     if message.content.startswith("!syncghweek"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
 
-        # 1. Р’РёР·РЅР°С‡Р°С”РјРѕ РїРѕС‡Р°С‚РѕРє С‚РёР¶РЅСЏ (РІРєР°Р·Р°РЅРѕРіРѕ Р°Р±Рѕ РїРѕС‚РѕС‡РЅРѕРіРѕ)
+        # 1. Визначаємо початок тижня (вказаного або поточного)
         parts = message.content.split()
         now = datetime.now(timezone.utc)
         
         if len(parts) > 1 and parts[1].isdigit():
             target_week = int(parts[1])
             try:
-                # РЁСѓРєР°С”РјРѕ РїРѕРЅРµРґС–Р»РѕРє РґР»СЏ РІРєР°Р·Р°РЅРѕРіРѕ С‚РёР¶РЅСЏ Сѓ РїРѕС‚РѕС‡РЅРѕРјСѓ СЂРѕС†С–
+                # Шукаємо понеділок для вказаного тижня у поточному році
                 monday_start = datetime.fromisocalendar(now.year, target_week, 1).replace(tzinfo=timezone.utc)
                 monday_start = monday_start.replace(hour=0, minute=0, second=0, microsecond=0)
             except ValueError:
-                return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** РќРµС–СЃРЅСѓСЋС‡РёР№ РЅРѕРјРµСЂ С‚РёР¶РЅСЏ.")
+                return await message.channel.send("❌ **Помилка:** Неіснуючий номер тижня.")
         else:
-            # РЇРєС‰Рѕ РЅРѕРјРµСЂ РЅРµ РІРєР°Р·Р°РЅРѕ вЂ” Р±РµСЂРµРјРѕ РїРѕС‚РѕС‡РЅРёР№ С‚РёР¶РґРµРЅСЊ
+            # Якщо номер не вказано — беремо поточний тиждень
             monday_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
 
         start_iso = monday_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        current_week_tag = get_iso_week(start_iso) # Р—Р°РїСѓСЃРєР°С”РјРѕ С‡РµСЂРµР· С‚РІРѕСЋ С„СѓРЅРєС†С–СЋ РґР»СЏ С–РґРµР°Р»СЊРЅРѕРіРѕ Р·Р±С–РіСѓ С„РѕСЂРјР°С‚Сѓ
+        current_week_tag = get_iso_week(start_iso) # Запускаємо через твою функцію для ідеального збігу формату
 
-        status_msg = await message.channel.send(f"вЏі **РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЏ Р· GitHub:** РїРµСЂРµРІС–СЂСЏСЋ СЂРµР№СЃРё С‚РёР¶РЅСЏ (`{current_week_tag}`)...")
+        status_msg = await message.channel.send(f"⏳ **Синхронізація з GitHub:** перевіряю рейси тижня (`{current_week_tag}`)...")
 
         try:
             async with aiohttp.ClientSession() as session:
-                # 2. Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ СЂРµР№СЃРё Р·Р° С‚РёР¶РґРµРЅСЊ Р· Newsky (Р· Р°РЅС‚Рё-Р»С–РјС–С‚РѕРј)
+                # 2. Завантажуємо рейси за тиждень з Newsky (з анти-лімітом)
                 flights_list = []
                 skip_count = 0
                 batch_size = 100
@@ -2134,38 +2135,38 @@ async def on_message(message):
                 
                 while True:
                     if retry_count == 0:
-                        await status_msg.edit(content=f"вЏі Р—Р°РІР°РЅС‚Р°Р¶СѓСЋ Р· Newsky (Р·РјС–С‰РµРЅРЅСЏ: {skip_count})...")
+                        await status_msg.edit(content=f"⏳ Завантажую з Newsky (зміщення: {skip_count})...")
                         
                     body = {"count": batch_size, "skip": skip_count, "start": start_iso}
                     recent = await fetch_api(session, "/flights/recent", method="POST", body=body)
                     
-                    # РЇРєС‰Рѕ Newsky Р·Р°Р±Р»РѕРєСѓРІР°РІ Р·Р°РїРёС‚ (429 Р»С–РјС–С‚), С‡РµРєР°С”РјРѕ 5 СЃРµРє С– РїСЂРѕР±СѓС”РјРѕ Р·РЅРѕРІСѓ
+                    # Якщо Newsky заблокував запит (429 ліміт), чекаємо 5 сек і пробуємо знову
                     if recent is None:
                         retry_count += 1
                         if retry_count > 5:
-                            await status_msg.edit(content=f"вќЊ **Р—СѓРїРёРЅРєР°:** API Newsky РЅРµ РІС–РґРїРѕРІС–РґР°С” РїС–СЃР»СЏ 5 СЃРїСЂРѕР±. Р’Р¶Рµ РІРёРєР°С‡Р°РЅРѕ {len(flights_list)} СЂРµР№СЃС–РІ.")
+                            await status_msg.edit(content=f"❌ **Зупинка:** API Newsky не відповідає після 5 спроб. Вже викачано {len(flights_list)} рейсів.")
                             break
                         await asyncio.sleep(5)
                         continue
                         
-                    retry_count = 0 # РЈСЃРїС–С…! РЎРєРёРґР°С”РјРѕ Р»С–С‡РёР»СЊРЅРёРє
+                    retry_count = 0 # Успіх! Скидаємо лічильник
                     
                     if not recent or "results" not in recent or not recent["results"]: 
-                        break # РЎРїСЂР°РІР¶РЅС” РґРЅРѕ СЃРїРёСЃРєСѓ РґР»СЏ С†СЊРѕРіРѕ С‚РёР¶РЅСЏ
+                        break # Справжнє дно списку для цього тижня
                         
                     flights_list.extend(recent["results"])
                     if len(recent["results"]) < batch_size: 
-                        break # РњРµРЅС€Рµ 100 СЂРµР№СЃС–РІ вЂ” С†Рµ РѕСЃС‚Р°РЅРЅСЏ СЃС‚РѕСЂС–РЅРєР°
+                        break # Менше 100 рейсів — це остання сторінка
                         
                     skip_count += batch_size
                     
                 total_found = len(flights_list)
                 if total_found == 0:
-                    return await status_msg.edit(content=f"вњ… **Р—Р° С‚РёР¶РґРµРЅСЊ `{current_week_tag}` С‰Рµ РЅРµРјР°С” СЂРµР№СЃС–РІ РЅР° Newsky.**")
+                    return await status_msg.edit(content=f"✅ **За тиждень `{current_week_tag}` ще немає рейсів на Newsky.**")
 
-                await status_msg.edit(content=f"вЏі **Р—РЅР°Р№РґРµРЅРѕ {total_found} СЂРµР№СЃС–РІ РЅР° Newsky. Р§РёС‚Р°СЋ Р±Р°Р·Сѓ GitHub...**")
+                await status_msg.edit(content=f"⏳ **Знайдено {total_found} рейсів на Newsky. Читаю базу GitHub...**")
 
-                # 3. Р§РёС‚Р°С”РјРѕ РїРѕС‚РѕС‡РЅРёР№ С„Р°Р№Р» С‚РёР¶РЅСЏ Р· GitHub
+                # 3. Читаємо поточний файл тижня з GitHub
                 week_filename = f"{current_week_tag}.json"
                 file_path = f"FLIGHTS/{week_filename}"
                 gh_headers = {
@@ -2195,7 +2196,7 @@ async def on_message(message):
                             text_content = base64.b64decode(blob_data['content']).decode('utf-8')
                             github_file_content = json.loads(text_content)
 
-                # 4. Р’РёР·РЅР°С‡Р°С”РјРѕ РІС–РґСЃСѓС‚РЅС– СЂРµР№СЃРё
+                # 4. Визначаємо відсутні рейси
                 ignored_list = load_ignored()
                 missing_flights = []
                 flights_list.sort(key=lambda x: x.get("updatedAt", ""))
@@ -2209,7 +2210,7 @@ async def on_message(message):
                     arrival_time = raw_f.get("arrTimeAct") or raw_f.get("close")
                     if get_iso_week(arrival_time) != current_week_tag: continue
                     
-                    # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё СЂРµР№СЃ Р’Р–Р• Р„ РЅР° РіС–С‚С…Р°Р±С–
+                    # Перевіряємо, чи рейс ВЖЕ Є на гітхабі
                     already_exists = any(
                         str(f.get("_id")) == fid or str(f.get("id")) == fid 
                         for p in github_file_content for f in p.get("flights", [])
@@ -2221,17 +2222,17 @@ async def on_message(message):
                             missing_flights.append(det["flight"])
 
                 if not missing_flights:
-                    return await status_msg.edit(content=f"вњ… **РЈСЃС– СЂРµР№СЃРё Р·Р° С‚РёР¶РґРµРЅСЊ `{current_week_tag}` РІР¶Рµ РЅР° GitHub!** Р’С–РґСЃСѓС‚РЅС–С… СЂРµР№СЃС–РІ РЅРµРјР°С”.")
+                    return await status_msg.edit(content=f"✅ **Усі рейси за тиждень `{current_week_tag}` вже на GitHub!** Відсутніх рейсів немає.")
 
-                # 5. РџРѕРєР°Р·СѓС”РјРѕ СЃРїРёСЃРѕРє Р’РЎР†РҐ СЂРµР№СЃС–РІ (Р· СЂРѕР·СѓРјРЅРёРј СЂРѕР·Р±РёС‚С‚СЏРј РЅР° РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ)
-                header = f"рџ“‹ **РњР°СЋ РґРѕРґР°С‚Рё РѕСЃСЊ С‚Р°РєС– СЂРµР№СЃРё ({len(missing_flights)} С€С‚) РґР»СЏ {current_week_tag}:**\n"
+                # 5. Показуємо список ВСІХ рейсів (з розумним розбиттям на повідомлення)
+                header = f"📋 **Маю додати ось такі рейси ({len(missing_flights)} шт) для {current_week_tag}:**\n"
                 chunks = []
                 current_chunk = header
                 
                 for mf in missing_flights:
                     fid = mf.get("_id") or mf.get("id")
                     cs = mf.get("flightNumber") or mf.get("callsign") or "Unknown"
-                    line = f"вњ€пёЏ [{cs}](https://newsky.app/flight/{fid})\n"
+                    line = f"✈️ [{cs}](https://newsky.app/flight/{fid})\n"
                     
                     if len(current_chunk) + len(line) > 1900:
                         chunks.append(current_chunk)
@@ -2239,7 +2240,7 @@ async def on_message(message):
                     else:
                         current_chunk += line
                 
-                current_chunk += "\nвњЌпёЏ РќР°РїРёС€Рё `yes` С‰РѕР± РїС–РґС‚РІРµСЂРґРёС‚Рё, Р°Р±Рѕ `no` С‰РѕР± СЃРєР°СЃСѓРІР°С‚Рё (РјР°С”С€ 180 СЃРµРєСѓРЅРґ)."
+                current_chunk += "\n✍️ Напиши `yes` щоб підтвердити, або `no` щоб скасувати (маєш 180 секунд)."
                 chunks.append(current_chunk)
 
                 await status_msg.edit(content=chunks[0], suppress=True)
@@ -2255,20 +2256,20 @@ async def on_message(message):
                 try:
                     reply = await client.wait_for('message', check=check, timeout=180.0)
                     if reply.content.lower() == 'no':
-                        return await status_msg.edit(content="вќЊ **РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЋ СЃРєР°СЃРѕРІР°РЅРѕ.**")
+                        return await status_msg.edit(content="❌ **Синхронізацію скасовано.**")
                 except asyncio.TimeoutError:
-                    return await status_msg.edit(content="вЏі **Р§Р°СЃ РІРёР№С€РѕРІ (180 СЃРµРє).** РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЋ СЃРєР°СЃРѕРІР°РЅРѕ.")
+                    return await status_msg.edit(content="⏳ **Час вийшов (180 сек).** Синхронізацію скасовано.")
                 finally:
-                    # РћС‡РёС‰Р°С”РјРѕ РґРѕРґР°С‚РєРѕРІС– РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ
+                    # Очищаємо додаткові повідомлення
                     for msg in extra_msgs:
                         try: await msg.delete()
                         except: pass
 
-                # 6. РљРћР РРЎРўРЈР’РђР§ РџР†Р”РўР’Р•Р Р”РР’ (yes) -> Рњ'СЏСЃРѕСЂСѓР±РєР° С– Р„РґРёРЅРёР№ РџСѓС€
-                await status_msg.edit(content="вЏі **РџС–РґС‚РІРµСЂРґР¶РµРЅРѕ! РћР±СЂРѕР±Р»СЏСЋ СЂРµР№СЃРё С‚Р° Р·Р°РїРёСЃСѓСЋ РЅР° GitHub С”РґРёРЅРёРј РєРѕРјС–С‚РѕРј...**")
+                # 6. КОРИСТУВАЧ ПІДТВЕРДИВ (yes) -> М'ясорубка і Єдиний Пуш
+                await status_msg.edit(content="⏳ **Підтверджено! Обробляю рейси та записую на GitHub єдиним комітом...**")
                 
                 async with GITHUB_DB_LOCK:
-                    # РџРѕРІС‚РѕСЂРЅРѕ РІРёС‚СЏРіСѓС”РјРѕ SHA, РЅР° РІРёРїР°РґРѕРє, СЏРєС‰Рѕ С„Р°Р№Р» Р·РјС–РЅРёРІСЃСЏ РїС–Рґ С‡Р°СЃ 180 СЃРµРєСѓРЅРґ РѕС‡С–РєСѓРІР°РЅРЅСЏ
+                    # Повторно витягуємо SHA, на випадок, якщо файл змінився під час 180 секунд очікування
                     async with session.get(dir_url, headers=gh_headers) as dir_resp:
                         if dir_resp.status == 200:
                             dir_data = await dir_resp.json()
@@ -2286,7 +2287,7 @@ async def on_message(message):
                                 github_file_content = json.loads(base64.b64decode(blob_data['content']).decode('utf-8'))
 
                     for f in missing_flights:
-                        # РџРѕРґРІС–Р№РЅРёР№ Р·Р°С…РёСЃС‚ РІС–Рґ РґСѓР±Р»С–РІ
+                        # Подвійний захист від дублів
                         fid = str(f.get("_id") or f.get("id"))
                         if any(str(ex_f.get("_id")) == fid for p in github_file_content for ex_f in p.get("flights", [])):
                             continue
@@ -2308,12 +2309,12 @@ async def on_message(message):
                                 "pilot_id": pilot_id, "fullname": pilot_name, "avatar": pilot_avatar, "flights": [clean_flight]
                             })
                             
-                    # РџСѓС€РёРјРѕ РѕРґРЅРёРј РєРѕРјС–С‚РѕРј
+                    # Пушимо одним комітом
                     new_content_str = json.dumps(github_file_content, ensure_ascii=False, indent=4)
                     new_content_b64 = base64.b64encode(new_content_str.encode('utf-8')).decode('utf-8')
                     
                     push_payload = {
-                        "message": f"рџ¤– Auto-sync: confirmed addition of {len(missing_flights)} flights to {current_week_tag}",
+                        "message": f"🤖 Auto-sync: confirmed addition of {len(missing_flights)} flights to {current_week_tag}",
                         "content": new_content_b64
                     }
                     if file_sha: push_payload["sha"] = file_sha
@@ -2321,38 +2322,38 @@ async def on_message(message):
                     put_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
                     async with session.put(put_url, headers=gh_headers, json=push_payload) as put_resp:
                         if put_resp.status in [200, 201]:
-                            await status_msg.edit(content=f"вњ… **РЈСЃРїС–С…!** Р”РѕРґР°РЅРѕ **{len(missing_flights)}** СЂРµР№СЃС–РІ Сѓ С„Р°Р№Р» `{week_filename}` РЅР° GitHub.")
+                            await status_msg.edit(content=f"✅ **Успіх!** Додано **{len(missing_flights)}** рейсів у файл `{week_filename}` на GitHub.")
                         else:
-                            await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР° Р·Р°РїРёСЃСѓ РЅР° GitHub:** {await put_resp.text()}")
+                            await status_msg.edit(content=f"❌ **Помилка запису на GitHub:** {await put_resp.text()}")
 
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РЎС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР°:** {e}")
+            await status_msg.edit(content=f"❌ **Сталася помилка:** {e}")
         return
     # -------------------------------------------------------------
 	
-# --- рџ“Ґ РљРћРњРђРќР”Рђ: !syncweek (РЎРРќРҐР РћРќР†Р—РђР¦Р†РЇ Р—Рђ Р§РђРЎРћРњ Р—РђРљР РРўРўРЇ Р Р•Р™РЎР†Р’) ---
+# --- 📥 КОМАНДА: !syncweek (СИНХРОНІЗАЦІЯ ЗА ЧАСОМ ЗАКРИТТЯ РЕЙСІВ) ---
     if message.content.startswith("!syncweek"):
         if not is_admin: 
-            return await message.channel.send("рџљ« **Access Denied**")
+            return await message.channel.send("🚫 **Access Denied**")
         
-        # 1. Р§РёС‚Р°С”РјРѕ РєС–Р»СЊРєС–СЃС‚СЊ СЂРµР№СЃС–РІ (Р·Р° Р·Р°РјРѕРІС‡СѓРІР°РЅРЅСЏРј 100)
+        # 1. Читаємо кількість рейсів (за замовчуванням 100)
         parts = message.content.split()
         target_count = 100
         if len(parts) > 1 and parts[1].isdigit():
             target_count = int(parts[1])
             
-        # 2. Р’РёР·РЅР°С‡Р°С”РјРѕ РїРѕС‡Р°С‚РѕРє РїРѕС‚РѕС‡РЅРѕРіРѕ С‚РёР¶РЅСЏ (РџРѕРЅРµРґС–Р»РѕРє, 00:00:00 UTC)
+        # 2. Визначаємо початок поточного тижня (Понеділок, 00:00:00 UTC)
         now = datetime.now(timezone.utc)
         monday = now - timedelta(days=now.weekday())
         monday_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
         start_iso = monday_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         current_week_tag = get_iso_week()
         
-        status_msg = await message.channel.send(f"вЏі **Р Р°С…СѓСЋ СЂРµР№СЃРё (Р»С–РјС–С‚: {target_count}) Р· РїРѕС‡Р°С‚РєСѓ С‚РёР¶РЅСЏ ({monday_start.strftime('%d.%m.%Y')})...**")
+        status_msg = await message.channel.send(f"⏳ **Рахую рейси (ліміт: {target_count}) з початку тижня ({monday_start.strftime('%d.%m.%Y')})...**")
         
         try:
             async with aiohttp.ClientSession() as session:
-                # --- РќРћР’РР™ Р‘Р›РћРљ Р—Р‘РћР РЈ Р Р•Р™РЎР†Р’ (РџРђР“Р†РќРђР¦Р†РЇ) ---
+                # --- НОВИЙ БЛОК ЗБОРУ РЕЙСІВ (ПАГІНАЦІЯ) ---
                 flights_list = []
                 skip_count = 0
                 
@@ -2368,7 +2369,7 @@ async def on_message(message):
                     
                     if not recent or "results" not in recent:
                         if skip_count == 0:
-                            return await status_msg.edit(content="вќЊ **РџРѕРјРёР»РєР°:** РќРµ РІРґР°Р»РѕСЃСЏ РѕС‚СЂРёРјР°С‚Рё СЃРїРёСЃРѕРє СЂРµР№СЃС–РІ РІС–Рґ Newsky.")
+                            return await status_msg.edit(content="❌ **Помилка:** Не вдалося отримати список рейсів від Newsky.")
                         break
                     
                     batch = recent["results"]
@@ -2380,22 +2381,22 @@ async def on_message(message):
                     skip_count += request_count
                 # ---------------------------------------------
                 
-                # --- РЎРўРђР Рђ Р›РћР“Р†РљРђ РћР‘Р РћР‘РљР (Р‘Р•Р— Р—РњР†Рќ) ---
+                # --- СТАРА ЛОГІКА ОБРОБКИ (БЕЗ ЗМІН) ---
                 total_found = len(flights_list)
                 added_count = 0
                 
                 if total_found == 0:
-                    return await status_msg.edit(content="вњ… **Р—Р° С†РµР№ С‚РёР¶РґРµРЅСЊ С‰Рµ РЅРµРјР°С” Р·Р°РІРµСЂС€РµРЅРёС… СЂРµР№СЃС–РІ.**")
+                    return await status_msg.edit(content="✅ **За цей тиждень ще немає завершених рейсів.**")
                 
-                # рџ”Ґ РњРђР“Р†РЇ РўРЈРў: РЎРѕСЂС‚СѓС”РјРѕ СЃС‚СЂРѕРіРѕ Р·Р° С‡Р°СЃРѕРј Р—РђРљР РРўРўРЇ СЂРµР№СЃСѓ (updatedAt)
-                # Р’С–Рґ С‚РёС…, С‰Рѕ Р·Р°РєСЂРёР»РёСЃСЏ РїРµСЂС€РёРјРё, РґРѕ С‚РёС…, С‰Рѕ Р·Р°РєСЂРёР»РёСЃСЏ С‰РѕР№РЅРѕ.
-                # Р¦Рµ РїРѕРІРЅС–СЃС‚СЋ С–РјС–С‚СѓС” СЂРѕР±РѕС‚Сѓ Р¶РёРІРѕРіРѕ Р±РѕС‚Р°!
+                # 🔥 МАГІЯ ТУТ: Сортуємо строго за часом ЗАКРИТТЯ рейсу (updatedAt)
+                # Від тих, що закрилися першими, до тих, що закрилися щойно.
+                # Це повністю імітує роботу живого бота!
                 flights_list.sort(key=lambda x: x.get("updatedAt", ""))
                 
-                await status_msg.edit(content=f"вЏі **Р—РЅР°Р№РґРµРЅРѕ {total_found} СЂРµР№СЃС–РІ. Р”РѕРґР°СЋ РІ РїРѕСЂСЏРґРєСѓ С—С… Р·Р°РєСЂРёС‚С‚СЏ...**")
+                await status_msg.edit(content=f"⏳ **Знайдено {total_found} рейсів. Додаю в порядку їх закриття...**")
 
                 ignored_list = load_ignored()
-                fid = "РќРµРІС–РґРѕРјРѕ"
+                fid = "Невідомо"
                 for raw_f in flights_list:
                     if raw_f.get("deleted") or not raw_f.get("close"):
                         continue
@@ -2425,24 +2426,24 @@ async def on_message(message):
                     added_count += 1
                     
                     if added_count % 5 == 0:
-                        await status_msg.edit(content=f"вЏі **РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЏ: РґРѕРґР°РЅРѕ {added_count} / {total_found} СЂРµР№СЃС–РІ...**")
+                        await status_msg.edit(content=f"⏳ **Синхронізація: додано {added_count} / {total_found} рейсів...**")
                         
-                await status_msg.edit(content=f"вњ… **РЎРёРЅС…СЂРѕРЅС–Р·Р°С†С–СЏ Р·Р°РІРµСЂС€РµРЅР°!**\nР”РѕРґР°РЅРѕ **{added_count}** СЂРµР№СЃС–РІ Сѓ СЃС‚Р°С‚РёСЃС‚РёРєСѓ С‚Р°Рє, СЏРєР±Рё Р±РѕС‚ Р±СѓРІ РѕРЅР»Р°Р№РЅ РІРµСЃСЊ С‚РёР¶РґРµРЅСЊ.")
+                await status_msg.edit(content=f"✅ **Синхронізація завершена!**\nДодано **{added_count}** рейсів у статистику так, якби бот був онлайн весь тиждень.")
                 
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РЎС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР° РЅР° СЂРµР№СЃС– {fid}:** {e}")
+            await status_msg.edit(content=f"❌ **Сталася помилка на рейсі {fid}:** {e}")
         return
     # -------------------------------------------------------------
     
-    # --- рџ§Є РљРћРњРђРќР”Рђ: !testcharter (РџР РћРўР•РЎРўРЈР’РђРўР Р”РР—РђР™Рќ Р§РђР РўР•Р РЈ - РўР†Р›Р¬РљР Р’ РџРџ) ---
+    # --- 🧪 КОМАНДА: !testcharter (ПРОТЕСТУВАТИ ДИЗАЙН ЧАРТЕРУ - ТІЛЬКИ В ПП) ---
     if message.content == "!testcharter":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        # рџ”Ґ РџРµСЂРµРІС–СЂРєР° РЅР° С‚Рµ, С‡Рё С†Рµ РџРџ (Direct Messages) рџ”Ґ
+        # 🔥 Перевірка на те, чи це ПП (Direct Messages) 🔥
         if not isinstance(message.channel, discord.DMChannel):
-            return await message.channel.send("вљ пёЏ **This command ONLY works in Direct Messages (DM)!** Please send me a private message.")
+            return await message.channel.send("⚠️ **This command ONLY works in Direct Messages (DM)!** Please send me a private message.")
         
-        status_msg = await message.channel.send("вЏі **РЁСѓРєР°СЋ Р±СѓРґСЊ-СЏРєРёР№ С‡Р°СЂС‚РµСЂ РґР»СЏ С‚РµСЃС‚Сѓ РґРёР·Р°Р№РЅСѓ...**")
+        status_msg = await message.channel.send("⏳ **Шукаю будь-який чартер для тесту дизайну...**")
         try:
             ns_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -2454,7 +2455,7 @@ async def on_message(message):
                     if resp.status == 200:
                         data = await resp.json()
                         if data:
-                            # Р‘РµСЂРµРјРѕ РїСЂРѕСЃС‚Рѕ РїРµСЂС€РёР№ С‡Р°СЂС‚РµСЂ Р·С– СЃРїРёСЃРєСѓ РґР»СЏ С‚РµСЃС‚Сѓ
+                            # Беремо просто перший чартер зі списку для тесту
                             charter = data[0] 
                             
                             dep_icao = charter.get("dep", {}).get("icao", "")
@@ -2470,11 +2471,11 @@ async def on_message(message):
                             dist = charter.get("distance", 0)
                             
                             desc = (
-                                    f"{dep_str} вћ” {arr_str}\n\n"
-                                    f"рџ“Љ **Contract Info**\n"
-                                    f"в•° рџ‘« Quota: **{quota} Pax**\n"
-                                    f"в•° рџ“Џ Dist: **{dist} nm**\n"
-                                    f"в•° вЏі Exp: **{exp_str}**"
+                                    f"{dep_str} ➔ {arr_str}\n\n"
+                                    f"📊 **Contract Info**\n"
+                                    f"╰ 👫 Quota: **{quota} Pax**\n"
+                                    f"╰ 📏 Dist: **{dist} nm**\n"
+                                    f"╰ ⏳ Exp: **{exp_str}**"
                                 )
                             
                             embed = discord.Embed(
@@ -2483,180 +2484,180 @@ async def on_message(message):
                                 color=0xffcc00
                             )
                             
-                            await message.channel.send(content="рџ› пёЏ **РћСЃСЊ С‚Р°Рє РІРёРіР»СЏРґР°С‚РёРјРµ СЃРїРѕРІС–С‰РµРЅРЅСЏ:**", embed=embed)
+                            await message.channel.send(content="🛠️ **Ось так виглядатиме сповіщення:**", embed=embed)
                             await status_msg.delete()
                         else:
-                            await status_msg.edit(content="вќЊ **РќР°СЂР°Р·С– РЅРµРјР°С” Р¶РѕРґРЅРѕРіРѕ С‡Р°СЂС‚РµСЂСѓ РІ API РґР»СЏ С‚РµСЃС‚Сѓ.**")
+                            await status_msg.edit(content="❌ **Наразі немає жодного чартеру в API для тесту.**")
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР°:** {e}")
+            await status_msg.edit(content=f"❌ **Помилка:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ”„ РљРћРњРђРќР”Рђ: !updatedemand (РџР РРњРЈРЎРћР’Р• РћРќРћР’Р›Р•РќРќРЇ GITHUB) ---
+	# --- 🔄 КОМАНДА: !updatedemand (ПРИМУСОВЕ ОНОВЛЕННЯ GITHUB) ---
     if message.content == "!updatedemand":
         if not is_admin: 
-            return await message.channel.send("рџљ« **Access Denied**")
+            return await message.channel.send("🚫 **Access Denied**")
 
-        status_msg = await message.channel.send("вЏі **Step 1: Fetching raw demand data...**")
+        status_msg = await message.channel.send("⏳ **Step 1: Fetching raw demand data...**")
 
         try:
             async with GITHUB_DB_LOCK:
                 async with aiohttp.ClientSession() as session:
                     demand_content = await fetch_demand_data(session)
                     if not demand_content:
-                        return await status_msg.edit(content="вќЊ **Error:** Failed to fetch or parse demand data.")
+                        return await status_msg.edit(content="❌ **Error:** Failed to fetch or parse demand data.")
                     
                     files_to_push = {GITHUB_FILE_PATH: demand_content}
                     
-                    # РћС‚СЂРёРјСѓС”РјРѕ С‡Р°СЂС‚РµСЂРё Р»РѕРєР°Р»СЊРЅРѕ Р”Рћ РєРѕРјС–С‚Сѓ
+                    # Отримуємо чартери локально ДО коміту
                     charter_results = await run_analytics_pipeline(session, demand_content=demand_content, ctx=message.channel)
                     if charter_results:
                         files_to_push["newsky-charter-results.txt"] = charter_results
                         
-                    # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РѕР±РёРґРІР° С„Р°Р№Р»Рё РѕРґРЅРёРј РїСѓС€РµРј
-                    success = await push_to_github_batch(session, files_to_push, "рџ¤– Manual Demand & Tops Update")
+                    # Відправляємо обидва файли одним пушем
+                    success = await push_to_github_batch(session, files_to_push, "🤖 Manual Demand & Tops Update")
                     
                     if success:
-                        await status_msg.edit(content="вњ… **All files updated on GitHub in ONE commit!** рџљЂ")
+                        await status_msg.edit(content="✅ **All files updated on GitHub in ONE commit!** 🚀")
                     else:
-                        await status_msg.edit(content="вќЊ **Error pushing to GitHub.**")
+                        await status_msg.edit(content="❌ **Error pushing to GitHub.**")
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **Error:** {e}")
+            await status_msg.edit(content=f"❌ **Error:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ§Є РљРћРњРђРќР”Рђ: !testgh <ID> (РџР РРњРЈРЎРћР’РР™ Р—РђРџРРЎ Р Р•Р™РЎРЈ РќРђ GITHUB) ---
+	# --- 🧪 КОМАНДА: !testgh <ID> (ПРИМУСОВИЙ ЗАПИС РЕЙСУ НА GITHUB) ---
     if message.content.startswith("!testgh"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!testgh <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!testgh <Flight_ID>`")
             
         fid = parts[1]
-        status_msg = await message.channel.send(f"вЏі **РЁСѓРєР°СЋ СЂРµР№СЃ `{fid}` С‚Р° Р·Р°РїРёСЃСѓСЋ РЅР° GitHub...**")
+        status_msg = await message.channel.send(f"⏳ **Шукаю рейс `{fid}` та записую на GitHub...**")
         
         try:
             async with aiohttp.ClientSession() as session:
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 if not det or "flight" not in det:
-                    return await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР°:** Р РµР№СЃ `{fid}` РЅРµ Р·РЅР°Р№РґРµРЅРѕ РІ API.")
+                    return await status_msg.edit(content=f"❌ **Помилка:** Рейс `{fid}` не знайдено в API.")
                 
                 f = det["flight"]
                 cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
                 
-                # 1. Р’РёР·РЅР°С‡Р°С”РјРѕ С‚РёР¶РґРµРЅСЊ Р·Р° С‡Р°СЃРѕРј РїРѕСЃР°РґРєРё
+                # 1. Визначаємо тиждень за часом посадки
                 arrival_time = f.get("arrTimeAct") or f.get("close")
                 target_week = get_iso_week(arrival_time)
                 
-                # 2. Р¤РѕСЂРјР°С‚СѓС”РјРѕ СЂРµР№СЃ
+                # 2. Форматуємо рейс
                 clean_flight = format_flight_for_db(f)
                 
-                # 3. Р”С–СЃС‚Р°С”РјРѕ РґР°РЅС– РїС–Р»РѕС‚Р°
+                # 3. Дістаємо дані пілота
                 pilot_data = f.get("pilot", {})
                 pilot_id = pilot_data.get("_id", "unknown")
                 pilot_name = pilot_data.get("fullname", "Unknown Pilot")
                 pilot_avatar = pilot_data.get("avatar", "default")
                 
-                # 4. Р—Р°РїРёСЃСѓС”РјРѕ РЅР° GitHub (С‚СѓС‚ РІРёРєРѕСЂРёСЃС‚РѕРІСѓС”РјРѕ await, С‰РѕР± РґРѕС‡РµРєР°С‚РёСЃСЏ СЂРµР·СѓР»СЊС‚Р°С‚Сѓ)
+                # 4. Записуємо на GitHub (тут використовуємо await, щоб дочекатися результату)
                 await save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
                 
-                await status_msg.edit(content=f"вњ… **РЈСЃРїС–С…!** Р РµР№СЃ `{cs}` (ID: `{fid}`) РІС–РґРїСЂР°РІР»РµРЅРѕ РЅР° GitHub Сѓ РїР°РїРєСѓ `FLIGHTS/{target_week}.json`!")
+                await status_msg.edit(content=f"✅ **Успіх!** Рейс `{cs}` (ID: `{fid}`) відправлено на GitHub у папку `FLIGHTS/{target_week}.json`!")
                 
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **Р’РЅСѓС‚СЂС–С€РЅСЏ РїРѕРјРёР»РєР°:** {e}")
+            await status_msg.edit(content=f"❌ **Внутрішня помилка:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџЊЄпёЏ РљРћРњРђРќР”Рђ: !testwind <ID> (РўР•РЎРўРћР’Р• РџРћР’Р†Р”РћРњР›Р•РќРќРЇ РџР Рћ РџРћРЎРђР”РљРЈ) ---
+	# --- 🌪️ КОМАНДА: !testwind <ID> (ТЕСТОВЕ ПОВІДОМЛЕННЯ ПРО ПОСАДКУ) ---
     if message.content.startswith("!testwind"):
         if not is_admin: 
-            return await message.channel.send("рџљ« **Access Denied**")
+            return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!testwind <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!testwind <Flight_ID>`")
         
         fid = parts[1]
-        msg = await message.channel.send(f"вЏі **Fetching data for flight `{fid}`...**")
+        msg = await message.channel.send(f"⏳ **Fetching data for flight `{fid}`...**")
         
         try:
             async with aiohttp.ClientSession() as session:
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 if not det or "flight" not in det:
-                    return await msg.edit(content=f"вќЊ **Error:** Flight `{fid}` not found in API.")
+                    return await msg.edit(content=f"❌ **Error:** Flight `{fid}` not found in API.")
                 
                 f = det["flight"]
                 
-                # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ С‚РµСЃС‚РѕРІРµ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ "Completed" Сѓ С‚РѕР№ Р¶Рµ РєР°РЅР°Р» (Р°Р±Рѕ РџРџ)
+                # Відправляємо тестове повідомлення "Completed" у той же канал (або ПП)
                 await send_flight_message(message.channel, "Completed", f, "result")
                 
-                await msg.edit(content=f"вњ… **Test message generated successfully!** (Stats were NOT updated)")
+                await msg.edit(content=f"✅ **Test message generated successfully!** (Stats were NOT updated)")
                 
         except Exception as e:
-            await msg.edit(content=f"вќЊ **Internal error occurred:** {e}")
+            await msg.edit(content=f"❌ **Internal error occurred:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- вњЏпёЏ РљРћРњРђРќР”Рђ: !rename <Channel_ID> <РЅРѕРІР° РЅР°Р·РІР°> (РџР•Р Р•Р™РњР•РќРЈР’РђРўР РљРђРќРђР›) ---
+	# --- ✏️ КОМАНДА: !rename <Channel_ID> <нова назва> (ПЕРЕЙМЕНУВАТИ КАНАЛ) ---
     if message.content.startswith("!rename"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split(" ", 2)
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ **Format:** `!rename <Channel_ID> <РЅРѕРІР°_РЅР°Р·РІР°>`")
+            return await message.channel.send("⚠️ **Format:** `!rename <Channel_ID> <нова_назва>`")
             
         target_id_str = parts[1]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ **Error:** Channel ID РјР°С” Р±СѓС‚Рё С‡РёСЃР»РѕРј.")
+             return await message.channel.send("⚠️ **Error:** Channel ID має бути числом.")
              
         target_channel_id = int(target_id_str)
         new_name = parts[2]
         
-        # Р’РёР·РЅР°С‡Р°С”РјРѕ СЃРµСЂРІРµСЂ (РїСЂР°С†СЋРІР°С‚РёРјРµ РЅР°РІС–С‚СЊ СЏРєС‰Рѕ С‚Рё РїРёС€РµС€ РєРѕРјР°РЅРґСѓ РІ РџРџ)
+        # Визначаємо сервер (працюватиме навіть якщо ти пишеш команду в ПП)
         main_channel = client.get_channel(CHANNEL_ID)
         guild = message.guild if message.guild else (main_channel.guild if main_channel else None)
         
         if not guild:
-            return await message.channel.send("вќЊ **Error:** РќРµ РІРґР°Р»РѕСЃСЏ РІРёР·РЅР°С‡РёС‚Рё СЃРµСЂРІРµСЂ.")
+            return await message.channel.send("❌ **Error:** Не вдалося визначити сервер.")
             
-        # РЁСѓРєР°С”РјРѕ РєР°РЅР°Р»
+        # Шукаємо канал
         target_channel = guild.get_channel(target_channel_id)
         if not target_channel:
              try:
                  target_channel = await guild.fetch_channel(target_channel_id)
              except:
-                 return await message.channel.send("вќЊ **Error:** РљР°РЅР°Р» Р· С‚Р°РєРёРј ID РЅРµ Р·РЅР°Р№РґРµРЅРѕ.")
+                 return await message.channel.send("❌ **Error:** Канал з таким ID не знайдено.")
                  
         try:
             old_name = target_channel.name
             await target_channel.edit(name=new_name)
-            await message.add_reaction("вњ…")
-            await message.channel.send(f"вњ… **РЈСЃРїС–С…!** РљР°РЅР°Р» `{old_name}` РїРµСЂРµР№РјРµРЅРѕРІР°РЅРѕ РЅР° `{new_name}`.")
+            await message.add_reaction("✅")
+            await message.channel.send(f"✅ **Успіх!** Канал `{old_name}` перейменовано на `{new_name}`.")
             
         except discord.Forbidden:
-            await message.channel.send("вќЊ **Error:** РЈ Р±РѕС‚Р° РЅРµРјР°С” РїСЂР°РІ РєРµСЂСѓРІР°С‚Рё С†РёРј РєР°РЅР°Р»РѕРј (РїРѕС‚СЂС–Р±РµРЅ РґРѕР·РІС–Р» Manage Channels).")
+            await message.channel.send("❌ **Error:** У бота немає прав керувати цим каналом (потрібен дозвіл Manage Channels).")
         except discord.HTTPException as e:
-            # Р’С–РґР»РѕРІР»СЋС”РјРѕ Р»С–РјС–С‚Рё Discord (Rate Limit: 2 РїРµСЂРµР№РјРµРЅСѓРІР°РЅРЅСЏ РЅР° 10 С…РІРёР»РёРЅ)
+            # Відловлюємо ліміти Discord (Rate Limit: 2 перейменування на 10 хвилин)
             if e.status == 429:
-                await message.channel.send("вЏі **Discord Rate Limit:** РўРё Р·Р°РЅР°РґС‚Рѕ С‡Р°СЃС‚Рѕ РїРµСЂРµР№РјРµРЅРѕРІСѓРІР°РІ С†РµР№ РєР°РЅР°Р». РџРѕС‡РµРєР°Р№ 10 С…РІРёР»РёРЅ С– СЃРїСЂРѕР±СѓР№ С‰Рµ СЂР°Р·.")
+                await message.channel.send("⏳ **Discord Rate Limit:** Ти занадто часто перейменовував цей канал. Почекай 10 хвилин і спробуй ще раз.")
             else:
-                await message.channel.send(f"вќЊ **HTTP Error:** {e}")
+                await message.channel.send(f"❌ **HTTP Error:** {e}")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error:** {e}")
+            await message.channel.send(f"❌ **Error:** {e}")
             
         return
     # -------------------------------------------------------------
 
-	# --- рџ§Є РљРћРњРђРќР”Рђ 1: !teststatspin (Р—Р† Р—РђРљР Р†РџР›Р•РќРќРЇРњ РўРђ Р’Р†Р”РљР Р†РџР›Р•РќРќРЇРњ) ---
+	# --- 🧪 КОМАНДА 1: !teststatspin (ЗІ ЗАКРІПЛЕННЯМ ТА ВІДКРІПЛЕННЯМ) ---
     if message.content == "!teststatspin":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         stats = load_weekly_stats()
-        if not stats: return await message.channel.send("вљ пёЏ **Stats file is empty.**")
+        if not stats: return await message.channel.send("⚠️ **Stats file is empty.**")
         
-        await message.channel.send("рџ› пёЏ **Generating real report (WITH pins)...**")
+        await message.channel.send("🛠️ **Generating real report (WITH pins)...**")
         try:
             pinned_msgs = await message.channel.pins()
             for p_msg in pinned_msgs:
@@ -2672,27 +2673,27 @@ async def on_message(message):
                 except Exception as e: print(f"Error pinning: {e}")
         return
 
-    # --- рџ“Њ РљРћРњРђРќР”Рђ 2: !teststats (Р‘Р•Р— Р—РђРљР Р†РџР›Р•РќРќРЇ) ---
+    # --- 📌 КОМАНДА 2: !teststats (БЕЗ ЗАКРІПЛЕННЯ) ---
     if message.content == "!teststats":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         stats = load_weekly_stats()
-        if not stats: return await message.channel.send("вљ пёЏ **Stats file is empty.**")
+        if not stats: return await message.channel.send("⚠️ **Stats file is empty.**")
         
-        await message.channel.send("рџ› пёЏ **Generating real report (NO pins)...**")
+        await message.channel.send("🛠️ **Generating real report (NO pins)...**")
         for week_tag, s in stats.items():
             await publish_weekly_embed(message.channel, week_tag, s)
         return
 
-    # --- рџ¤Ў РљРћРњРђРќР”Рђ 3: !teststatstest (Р¤Р•Р™РљРћР’Р† Р”РђРќР† Р”Р›РЇ РџР Р•Р—Р•РќРўРђР¦Р†Р‡) ---
+    # --- 🤡 КОМАНДА 3: !teststatstest (ФЕЙКОВІ ДАНІ ДЛЯ ПРЕЗЕНТАЦІЇ) ---
     if message.content == "!teststatstest":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        await message.channel.send("рџ› пёЏ **Generating presentation report (Randomized Fake Data)...**")
+        await message.channel.send("🛠️ **Generating presentation report (Randomized Fake Data)...**")
         
-        # Р Р°РЅРґРѕРјРЅС– Р±Р°Р·РѕРІС– Р·РЅР°С‡РµРЅРЅСЏ
+        # Рандомні базові значення
         f_count = random.randint(80, 200)
         
-        # Р”РѕРїРѕРјС–Р¶РЅР° С„СѓРЅРєС†С–СЏ РґР»СЏ РіРµРЅРµСЂР°С†С–С— РІРёРїР°РґРєРѕРІРёС… СЂРµР№СЃС–РІ (РўРћРџ-3)
+        # Допоміжна функція для генерації випадкових рейсів (ТОП-3)
         def gen_random_flights(time_min, time_max):
             apts = ["UKBB", "UKLL", "UKOO", "UKLU", "EPWA", "LOWW", "KJFK", "LTFM", "EDDF"]
             return [
@@ -2704,7 +2705,7 @@ async def on_message(message):
                 } for _ in range(3)
             ]
 
-        # Р“РµРЅРµСЂСѓС”РјРѕ РєСЂР°СЃРёРІС– С€С‚СѓС‡РЅС– РґР°РЅС–
+        # Генеруємо красиві штучні дані
         dummy_s = {
             "flights": f_count, 
             "earnings": f_count * random.randint(8000, 20000), 
@@ -2723,7 +2724,7 @@ async def on_message(message):
                 "butter": {"fpm": random.randint(-60, -10), "g": round(random.uniform(1.0, 1.05), 2), "pilot": "Capt. Silk"},
                 "hardest": {"fpm": random.randint(-800, -500), "g": round(random.uniform(1.6, 2.2), 2), "pilot": "Capt. Ryan"},
                 
-                # Р Р°РЅРґРѕРјРЅС– СЃРїРёСЃРєРё РґР»СЏ РўРћРџ-3 (РІС–РґСЃРѕСЂС‚РѕРІР°РЅС–)
+                # Рандомні списки для ТОП-3 (відсортовані)
                 "longest": sorted(gen_random_flights(400, 700), key=lambda x: x["time"], reverse=True),
                 "shortest": sorted(gen_random_flights(25, 60), key=lambda x: x["time"])
             }
@@ -2733,45 +2734,45 @@ async def on_message(message):
         await publish_weekly_embed(message.channel, current_week, dummy_s)
         return
 
-    # --- рџ§№ РљРћРњРђРќР”Рђ: !clearstats (РћР§РРЎРўРРўР Р’РЎР® РЎРўРђРўРРЎРўРРљРЈ Р— РџР•Р Р•Р’Р†Р РљРћР®) ---
+    # --- 🧹 КОМАНДА: !clearstats (ОЧИСТИТИ ВСЮ СТАТИСТИКУ З ПЕРЕВІРКОЮ) ---
     if message.content == "!clearstats":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        # Р“РµРЅРµСЂСѓС”РјРѕ РґРІР° С‡РёСЃР»Р° РІС–Рґ 3 РґРѕ 9
+        # Генеруємо два числа від 3 до 9
         num1 = random.randint(3, 9)
         num2 = random.randint(3, 9)
         correct_answer = num1 * num2
         
-        await message.channel.send(f"вљ пёЏ **WARNING!** You are about to completely wipe all weekly statistics.\nTo confirm this action, please solve this math problem:\n**What is {num1} x {num2}?**\n*(Just type the number in the chat, you have 10 seconds)*")
+        await message.channel.send(f"⚠️ **WARNING!** You are about to completely wipe all weekly statistics.\nTo confirm this action, please solve this math problem:\n**What is {num1} x {num2}?**\n*(Just type the number in the chat, you have 10 seconds)*")
         
-        # Р¤С–Р»СЊС‚СЂ: Р±РѕС‚ РїСЂРёР№РјРµ РІС–РґРїРѕРІС–РґСЊ С‚С–Р»СЊРєРё РІС–Рґ С‚РѕРіРѕ, С…С‚Рѕ Р·Р°РїСѓСЃС‚РёРІ РєРѕРјР°РЅРґСѓ, С– С‚С–Р»СЊРєРё РІ С†СЊРѕРјСѓ Р¶ РєР°РЅР°Р»С–
+        # Фільтр: бот прийме відповідь тільки від того, хто запустив команду, і тільки в цьому ж каналі
         def check(m):
             return m.author == message.author and m.channel == message.channel
             
         try:
-            # Р‘РѕС‚ С‡РµРєР°С” РЅР° РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ 10 СЃРµРєСѓРЅРґ
+            # Бот чекає на повідомлення 10 секунд
             reply = await client.wait_for('message', check=check, timeout=10.0)
             
-            # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё Р·С–Р№С€Р»Р°СЃСЏ РјР°С‚РµРјР°С‚РёРєР°
+            # Перевіряємо, чи зійшлася математика
             if reply.content.strip() == str(correct_answer):
                 save_weekly_stats({})
-                await message.channel.send("рџ—‘пёЏ **Stats file (`weekly_stats.json`) completely wiped!**")
+                await message.channel.send("🗑️ **Stats file (`weekly_stats.json`) completely wiped!**")
             else:
-                await message.channel.send(f"вќЊ **Wrong answer (it should be {correct_answer}).** Protection triggered, deletion cancelled! рџ…")
+                await message.channel.send(f"❌ **Wrong answer (it should be {correct_answer}).** Protection triggered, deletion cancelled! 😅")
                 
         except asyncio.TimeoutError:
-            # РЇРєС‰Рѕ Р·Р° 20 СЃРµРєСѓРЅРґ РЅС–С…С‚Рѕ РЅС–С‡РѕРіРѕ РЅРµ РЅР°РїРёСЃР°РІ
-            await message.channel.send("вЏі **Time's up.** Deletion operation cancelled.")
+            # Якщо за 20 секунд ніхто нічого не написав
+            await message.channel.send("⏳ **Time's up.** Deletion operation cancelled.")
             
         return
     # -------------------------------------------------------------
 
-	# --- рџ›‘ РљРћРњРђРќР”Рђ: !ignore <ID> (Р†Р“РќРћР РЈР’РђРўР Р‘РђР“РћР’РђРќРР™ Р Р•Р™РЎ) ---
+	# --- 🛑 КОМАНДА: !ignore <ID> (ІГНОРУВАТИ БАГОВАНИЙ РЕЙС) ---
     if message.content.startswith("!ignore"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!ignore <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!ignore <Flight_ID>`")
         
         fid = parts[1]
         ignored_list = load_ignored()
@@ -2779,25 +2780,25 @@ async def on_message(message):
             ignored_list.append(fid)
             save_ignored(ignored_list)
         
-        await message.channel.send(f"рџ›‘ **Р РµР№СЃ `{fid}` РЅР°Р·Р°РІР¶РґРё РґРѕРґР°РЅРѕ РІ `ignored.json`!**")
+        await message.channel.send(f"🛑 **Рейс `{fid}` назавжди додано в `ignored.json`!**")
         return
     # -------------------------------------------------------------
 
-	# --- вћ• РљРћРњРђРќР”Рђ: !addghflight <ID> [emer] (Р—РђРџРРЎРђРўР Р Р•Р™РЎ РќРђ GITHUB Р’Р РЈР§РќРЈ) ---
+	# --- ➕ КОМАНДА: !addghflight <ID> [emer] (ЗАПИСАТИ РЕЙС НА GITHUB ВРУЧНУ) ---
     if message.content.startswith("!addghflight"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ **Р¤РѕСЂРјР°С‚:** `!addghflight <Flight_ID> [emer]`")
+            return await message.channel.send("⚠️ **Формат:** `!addghflight <Flight_ID> [emer]`")
             
         fid = parts[1]
-        # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С” С‚СЂРµС‚С” СЃР»РѕРІРѕ С– С‡Рё С†Рµ "emer"
+        # Перевіряємо, чи є третє слово і чи це "emer"
         force_emer = len(parts) > 2 and parts[2].lower() == "emer"
         
-        status_text = f"вЏі **РЁСѓРєР°СЋ СЂРµР№СЃ `{fid}` РІ API Newsky...**"
+        status_text = f"⏳ **Шукаю рейс `{fid}` в API Newsky...**"
         if force_emer:
-            status_text += "\n*(РЈРІС–РјРєРЅРµРЅРѕ СЂРµР¶РёРј РїСЂРёРјСѓСЃРѕРІРѕРіРѕ EMERGENCY рџљЁ)*"
+            status_text += "\n*(Увімкнено режим примусового EMERGENCY 🚨)*"
             
         msg = await message.channel.send(status_text)
         
@@ -2806,27 +2807,27 @@ async def on_message(message):
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 if not det or "flight" not in det:
-                    return await msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР°:** Р РµР№СЃ `{fid}` РЅРµ Р·РЅР°Р№РґРµРЅРѕ РІ API.")
+                    return await msg.edit(content=f"❌ **Помилка:** Рейс `{fid}` не знайдено в API.")
                 
                 f = det["flight"]
                 cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
                 
-                # 1. РџСЂРѕРїСѓСЃРєР°С”РјРѕ С‡РµСЂРµР· Рј'СЏСЃРѕСЂСѓР±РєСѓ
+                # 1. Пропускаємо через м'ясорубку
                 clean_flight = format_flight_for_db(f)
                 
-                # 2. РЇРєС‰Рѕ РІРєР°Р·Р°РЅРѕ emer вЂ” С–РјС–С‚СѓС”РјРѕ РЎРџР РђР’Р–РќР†Р™ emergency!
+                # 2. Якщо вказано emer — імітуємо СПРАВЖНІЙ emergency!
                 if force_emer:
                     clean_flight["emergency"] = True
                     
                     if "result" in clean_flight:
-                        # РђРЅСѓР»СЋС”РјРѕ С„С–РЅР°РЅСЃРѕРІС– РїРѕРєР°Р·РЅРёРєРё
+                        # Анулюємо фінансові показники
                         if "totals" in clean_flight["result"]:
                             clean_flight["result"]["totals"]["expenses"] = 0
                             clean_flight["result"]["totals"]["penalties"] = 0
                             clean_flight["result"]["totals"]["revenue"] = 0
                             clean_flight["result"]["totals"]["balance"] = 0
                             
-                        # Р”РѕРґР°С”РјРѕ Р·Р°РїРёСЃ РїСЂРѕ Emergency Declared, РЅС–С‡РѕРіРѕ РЅРµ Р·Р°РјС–РЅСЋСЋС‡Рё
+                        # Додаємо запис про Emergency Declared, нічого не замінюючи
                         if "violations" in clean_flight["result"]:
                             clean_flight["result"]["violations"].append({
                                 "title": "Emergency Declared",
@@ -2841,49 +2842,49 @@ async def on_message(message):
                                 "wiki": "https://wiki.newsky.app/en/flight/rating-system#emergency"
                             })
                 
-                # 3. Р’РёР·РЅР°С‡Р°С”РјРѕ С‚РёР¶РґРµРЅСЊ Р·Р° С‡Р°СЃРѕРј РїРѕСЃР°РґРєРё
+                # 3. Визначаємо тиждень за часом посадки
                 arrival_time = f.get("arrTimeAct") or f.get("close")
                 target_week = get_iso_week(arrival_time)
                 
-                # 4. Р’РёС‚СЏРіСѓС”РјРѕ РґР°РЅС– РїС–Р»РѕС‚Р°
+                # 4. Витягуємо дані пілота
                 pilot_data = f.get("pilot", {})
                 pilot_id = pilot_data.get("_id", "unknown")
                 pilot_name = pilot_data.get("fullname", "Unknown Pilot")
                 pilot_avatar = pilot_data.get("avatar", "default")
                 
-                await msg.edit(content=f"вЏі Р”Р°РЅС– РѕС‚СЂРёРјР°РЅРѕ. Р—Р°РїРёСЃСѓСЋ СЂРµР№СЃ `{cs}` Сѓ С„Р°Р№Р» `{target_week}.json` РЅР° GitHub...")
+                await msg.edit(content=f"⏳ Дані отримано. Записую рейс `{cs}` у файл `{target_week}.json` на GitHub...")
                 
-                # 5. Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РЅР° GitHub
+                # 5. Відправляємо на GitHub
                 await save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
                 
-                # 6. Р—РІС–С‚ РїСЂРѕ СѓСЃРїС–С…
+                # 6. Звіт про успіх
                 if force_emer:
-                    await msg.edit(content=f"рџљЁ **РЈСЃРїС–С…!** Р РµР№СЃ `{cs}` (ID: `{fid}`) Р·Р°РїРёСЃР°РЅРѕ РЅР° GitHub Сѓ С‚РёР¶РґРµРЅСЊ `{target_week}` **С–Р· РїРѕРІРЅРѕСЋ С–РјС–С‚Р°С†С–С”СЋ EMERGENCY (С€С‚СЂР°С„Рё Р°РЅСѓР»СЊРѕРІР°РЅРѕ, Р»РѕРі РґРѕРґР°РЅРѕ)!**")
+                    await msg.edit(content=f"🚨 **Успіх!** Рейс `{cs}` (ID: `{fid}`) записано на GitHub у тиждень `{target_week}` **із повною імітацією EMERGENCY (штрафи анульовано, лог додано)!**")
                 else:
-                    await msg.edit(content=f"вњ… **РЈСЃРїС–С…!** Р РµР№СЃ `{cs}` (ID: `{fid}`) СѓСЃРїС–С€РЅРѕ РґРѕРґР°РЅРѕ РЅР° GitHub Сѓ С‚РёР¶РґРµРЅСЊ `{target_week}`.")
+                    await msg.edit(content=f"✅ **Успіх!** Рейс `{cs}` (ID: `{fid}`) успішно додано на GitHub у тиждень `{target_week}`.")
                 
         except Exception as e:
-            await msg.edit(content=f"вќЊ **Р’РЅСѓС‚СЂС–С€РЅСЏ РїРѕРјРёР»РєР°:** {e}")
+            await msg.edit(content=f"❌ **Внутрішня помилка:** {e}")
         return
 # -------------------------------------------------------------
 
-    # --- вћ• РљРћРњРђРќР”Рђ: !addflight <ID> (Р”РћР”РђРўР РџР РћРџРЈР©Р•РќРР™ Р Р•Р™РЎ) ---
+    # --- ➕ КОМАНДА: !addflight <ID> (ДОДАТИ ПРОПУЩЕНИЙ РЕЙС) ---
     if message.content.startswith("!addflight"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!addflight <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!addflight <Flight_ID>`")
         
         fid = parts[1]
-        msg = await message.channel.send(f"вЏі **Searching for flight `{fid}` in Newsky DB...**")
+        msg = await message.channel.send(f"⏳ **Searching for flight `{fid}` in Newsky DB...**")
         
         try:
             async with aiohttp.ClientSession() as session:
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 if not det or "flight" not in det:
-                    return await msg.edit(content=f"вќЊ **Error:** Flight `{fid}` not found in API.")
+                    return await msg.edit(content=f"❌ **Error:** Flight `{fid}` not found in API.")
                 
                 f = det["flight"]
                 
@@ -2893,26 +2894,26 @@ async def on_message(message):
                 update_weekly_stats(f, week_tag)
                 
                 cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
-                await msg.edit(content=f"вњ… **Flight `{cs}` successfully found and added to week `{week_tag}`!**")
+                await msg.edit(content=f"✅ **Flight `{cs}` successfully found and added to week `{week_tag}`!**")
                 
         except Exception as e:
-            await msg.edit(content=f"вќЊ **Internal error occurred:** {e}")
+            await msg.edit(content=f"❌ **Internal error occurred:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ—‘пёЏ РљРћРњРђРќР”Рђ: !delghflight <ID> (Р’РР”РђР›РРўР Р Р•Р™РЎ Р— GITHUB) ---
+	# --- 🗑️ КОМАНДА: !delghflight <ID> (ВИДАЛИТИ РЕЙС З GITHUB) ---
     if message.content.startswith("!delghflight"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!delghflight <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!delghflight <Flight_ID>`")
             
         target_id = parts[1]
-        status_msg = await message.channel.send(f"вЏі **РЁСѓРєР°СЋ СЂРµР№СЃ `{target_id}` Сѓ Р±Р°Р·С– GitHub...**")
+        status_msg = await message.channel.send(f"⏳ **Шукаю рейс `{target_id}` у базі GitHub...**")
         
         if not GITHUB_TOKEN:
-            return await status_msg.edit(content="вќЊ **РџРѕРјРёР»РєР°:** РќРµРјР°С” С‚РѕРєРµРЅСѓ GITHUB_TOKEN.")
+            return await status_msg.edit(content="❌ **Помилка:** Немає токену GITHUB_TOKEN.")
 
         gh_headers = {
             "Authorization": f"token {GITHUB_TOKEN}",
@@ -2926,14 +2927,14 @@ async def on_message(message):
         try:
             async with GITHUB_DB_LOCK:
                 async with aiohttp.ClientSession() as session:
-                    # 1. РћС‚СЂРёРјСѓС”РјРѕ Р°РєС‚СѓР°Р»СЊРЅРёР№ СЃРїРёСЃРѕРє С„Р°Р№Р»С–РІ (Р· Р°РЅС‚РёРєРµС€РµРј)
+                    # 1. Отримуємо актуальний список файлів (з антикешем)
                     dir_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/FLIGHTS?t={int(time.time())}"
                     async with session.get(dir_url, headers=gh_headers) as dir_resp:
                         if dir_resp.status != 200:
-                            return await status_msg.edit(content="вќЊ **РџРѕРјРёР»РєР°:** РќРµ РІРґР°Р»РѕСЃСЏ РѕС‚СЂРёРјР°С‚Рё СЃРїРёСЃРѕРє С„Р°Р№Р»С–РІ Р· GitHub.")
+                            return await status_msg.edit(content="❌ **Помилка:** Не вдалося отримати список файлів з GitHub.")
                         dir_data = await dir_resp.json()
 
-                    # 2. РџРµСЂРµР±РёСЂР°С”РјРѕ РІСЃС– С„Р°Р№Р»Рё Сѓ РїР°РїС†С–
+                    # 2. Перебираємо всі файли у папці
                     for item in dir_data:
                         file_name = item.get("name", "")
                         if not file_name.endswith(".json"): continue
@@ -2941,7 +2942,7 @@ async def on_message(message):
                         file_path = item["path"]
                         file_sha = item["sha"]
                         
-                        # 3. Р§РёС‚Р°С”РјРѕ С„Р°Р№Р» С‡РµСЂРµР· Blob API (РЅР°Р№СЃРІС–Р¶С–С€С– РґР°РЅС–)
+                        # 3. Читаємо файл через Blob API (найсвіжіші дані)
                         blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{file_sha}"
                         async with session.get(blob_url, headers=gh_headers) as blob_resp:
                             if blob_resp.status != 200: continue
@@ -2954,26 +2955,26 @@ async def on_message(message):
                         
                         changed = False
                         
-                        # 4. РЁСѓРєР°С”РјРѕ СЂРµР№СЃ СѓСЃРµСЂРµРґРёРЅС– С„Р°Р№Р»Сѓ
+                        # 4. Шукаємо рейс усередині файлу
                         for p in file_content:
                             original_len = len(p["flights"])
-                            # Р¤С–Р»СЊС‚СЂСѓС”РјРѕ СЂРµР№СЃРё, Р·Р°Р»РёС€Р°СЋС‡Рё РІСЃС–, РєСЂС–Рј С‚РѕРіРѕ, С‰Рѕ С‚СЂРµР±Р° РІРёРґР°Р»РёС‚Рё
+                            # Фільтруємо рейси, залишаючи всі, крім того, що треба видалити
                             p["flights"] = [f for f in p["flights"] if str(f.get("_id")) != target_id and str(f.get("id")) != target_id]
                             
-                            # РЇРєС‰Рѕ РґРѕРІР¶РёРЅР° РјР°СЃРёРІСѓ Р·РјС–РЅРёР»Р°СЃСЏ, Р·РЅР°С‡РёС‚СЊ СЂРµР№СЃ Р±СѓРІ С‚СѓС‚!
+                            # Якщо довжина масиву змінилася, значить рейс був тут!
                             if len(p["flights"]) < original_len:
                                 changed = True
                         
-                        # 5. РЇРєС‰Рѕ СЂРµР№СЃ Р·РЅР°Р№С€Р»Рё С– РІРёРґР°Р»РёР»Рё вЂ” Р·Р°РїРёСЃСѓС”РјРѕ С„Р°Р№Р» РЅР°Р·Р°Рґ
+                        # 5. Якщо рейс знайшли і видалили — записуємо файл назад
                         if changed:
-                            # РџС–РґС‡РёС‰Р°С”РјРѕ РїС–Р»РѕС‚С–РІ, Сѓ СЏРєРёС… 0 СЂРµР№СЃС–РІ РїС–СЃР»СЏ РІРёРґР°Р»РµРЅРЅСЏ
+                            # Підчищаємо пілотів, у яких 0 рейсів після видалення
                             file_content = [p for p in file_content if len(p["flights"]) > 0]
                             
                             new_content_str = json.dumps(file_content, ensure_ascii=False, indent=4)
                             new_content_b64 = base64.b64encode(new_content_str.encode('utf-8')).decode('utf-8')
                             
                             push_payload = {
-                                "message": f"рџ¤– Auto delete flight {target_id}",
+                                "message": f"🤖 Auto delete flight {target_id}",
                                 "content": new_content_b64,
                                 "sha": file_sha
                             }
@@ -2984,37 +2985,37 @@ async def on_message(message):
                                     deleted = True
                                     target_file = file_name
                             
-                            # РћСЃРєС–Р»СЊРєРё СЂРµР№СЃ СѓРЅС–РєР°Р»СЊРЅРёР№, СЏРєС‰Рѕ РјРё Р№РѕРіРѕ Р·РЅР°Р№С€Р»Рё С– РІРёРґР°Р»РёР»Рё вЂ” РґР°Р»С– С€СѓРєР°С‚Рё РЅРµРјР°С” СЃРµРЅСЃСѓ
+                            # Оскільки рейс унікальний, якщо ми його знайшли і видалили — далі шукати немає сенсу
                             break 
                             
         except Exception as e:
-            return await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ РІРёРґР°Р»РµРЅРЅСЏ:** {e}")
+            return await status_msg.edit(content=f"❌ **Помилка під час видалення:** {e}")
 
-        # 6. Р’РёРІРѕРґРёРјРѕ СЂРµР·СѓР»СЊС‚Р°С‚
+        # 6. Виводимо результат
         if deleted:
-            await status_msg.edit(content=f"вњ… **РЈСЃРїС–С…!** Р РµР№СЃ `{target_id}` РЅР°Р·Р°РІР¶РґРё РІРёРґР°Р»РµРЅРѕ Р· С„Р°Р№Р»Сѓ `{target_file}` РЅР° GitHub.")
+            await status_msg.edit(content=f"✅ **Успіх!** Рейс `{target_id}` назавжди видалено з файлу `{target_file}` на GitHub.")
         else:
-            await status_msg.edit(content=f"вљ пёЏ **Р РµР№СЃ РЅРµ Р·РЅР°Р№РґРµРЅРѕ.** Р РµР№СЃСѓ `{target_id}` РЅРµРјР°С” РІ Р¶РѕРґРЅРѕРјСѓ JSON-С„Р°Р№Р»С– РЅР° GitHub.")
+            await status_msg.edit(content=f"⚠️ **Рейс не знайдено.** Рейсу `{target_id}` немає в жодному JSON-файлі на GitHub.")
         return
     # -------------------------------------------------------------
 
-	# --- вћ– РљРћРњРђРќР”Рђ: !delflight <ID> (Р’Р†Р”РќРЇРўР Р Р•Р™РЎ Р—Р† РЎРўРђРўРРЎРўРРљР) ---
+	# --- ➖ КОМАНДА: !delflight <ID> (ВІДНЯТИ РЕЙС ЗІ СТАТИСТИКИ) ---
     if message.content.startswith("!delflight"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!delflight <Flight_ID>`")
+            return await message.channel.send("⚠️ Usage: `!delflight <Flight_ID>`")
         
         fid = parts[1]
-        msg = await message.channel.send(f"вЏі **Removing flight `{fid}` from stats...**")
+        msg = await message.channel.send(f"⏳ **Removing flight `{fid}` from stats...**")
         
         try:
             async with aiohttp.ClientSession() as session:
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 if not det or "flight" not in det:
-                    return await msg.edit(content=f"вќЊ **Error:** Flight `{fid}` not found in API.")
+                    return await msg.edit(content=f"❌ **Error:** Flight `{fid}` not found in API.")
                 
                 f = det["flight"]
                 sched_time = f.get("depTimeSched") or f.get("creationDate")
@@ -3022,7 +3023,7 @@ async def on_message(message):
                 
                 stats = load_weekly_stats()
                 if week_tag not in stats:
-                    return await msg.edit(content=f"вљ пёЏ Week `{week_tag}` not found in stats.")
+                    return await msg.edit(content=f"⚠️ Week `{week_tag}` not found in stats.")
                 
                 s = stats[week_tag]
                 
@@ -3068,34 +3069,34 @@ async def on_message(message):
                 save_weekly_stats(stats)
                 
                 cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
-                await msg.edit(content=f"вњ… **Flight `{cs}` successfully REMOVED from week `{week_tag}`!**\n*(Note: Totals and averages are fixed. Weekly records like 'Hardest Landing' are not changed).*")
+                await msg.edit(content=f"✅ **Flight `{cs}` successfully REMOVED from week `{week_tag}`!**\n*(Note: Totals and averages are fixed. Weekly records like 'Hardest Landing' are not changed).*")
                 
         except Exception as e:
-            await msg.edit(content=f"вќЊ **Internal error occurred:** {e}")
+            await msg.edit(content=f"❌ **Internal error occurred:** {e}")
         return
     # -------------------------------------------------------------
 
-        # --- рџ“Љ РљРћРњРђРќР”Рђ: !stats (РЎРљРђР§РђРўР Р¤РђР™Р› РЎРўРђРўРРЎРўРРљР) ---
+        # --- 📊 КОМАНДА: !stats (СКАЧАТИ ФАЙЛ СТАТИСТИКИ) ---
     if message.content == "!stats":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         try:
             if not WEEKLY_STATS_FILE.exists() or os.path.getsize(WEEKLY_STATS_FILE) == 0:
-                return await message.channel.send("вљ пёЏ **Stats file (weekly_stats.json) is empty or does not exist yet.**")
+                return await message.channel.send("⚠️ **Stats file (weekly_stats.json) is empty or does not exist yet.**")
                 
             with open(WEEKLY_STATS_FILE, "rb") as fp:
                 await message.channel.send(
-                    content="рџ“Љ **Weekly Stats File:**", 
+                    content="📊 **Weekly Stats File:**", 
                     file=discord.File(fp, filename="weekly_stats.json")
                 )
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error sending file:** {e}")
+            await message.channel.send(f"❌ **Error sending file:** {e}")
         return
     # --------------------------------------------------------
 
-    # --- рџ“њ РљРћРњРђРќР”Рђ: !audit [all/РєС–Р»СЊРєС–СЃС‚СЊ] (РЎРљРђР§РђРўР Р–РЈР РќРђР› РђРЈР”РРўРЈ) ---
+    # --- 📜 КОМАНДА: !audit [all/кількість] (СКАЧАТИ ЖУРНАЛ АУДИТУ) ---
     if message.content.startswith("!audit"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         
@@ -3111,14 +3112,14 @@ async def on_message(message):
 
         main_channel = client.get_channel(CHANNEL_ID)
         if not main_channel:
-            return await message.channel.send("вќЊ **Error:** Cannot find the main server. Check CHANNEL_ID.")
+            return await message.channel.send("❌ **Error:** Cannot find the main server. Check CHANNEL_ID.")
         
         guild = main_channel.guild
         
         if is_all:
-            await message.channel.send(f"вЏі **Gathering ALL available logs (up to 90 days) from '{guild.name}'... This may take a minute.**")
+            await message.channel.send(f"⏳ **Gathering ALL available logs (up to 90 days) from '{guild.name}'... This may take a minute.**")
         else:
-            await message.channel.send(f"вЏі **Gathering the last {fetch_limit} audit logs from '{guild.name}'...**")
+            await message.channel.send(f"⏳ **Gathering the last {fetch_limit} audit logs from '{guild.name}'...**")
         
         try:
             audit_text = f"=== Audit Log: {guild.name} ===\n"
@@ -3143,31 +3144,31 @@ async def on_message(message):
             file_bin = io.BytesIO(audit_text.encode('utf-8'))
             
             await message.channel.send(
-                content=f"вњ… **Done! Found {count} logs.** Here is your report:", 
+                content=f"✅ **Done! Found {count} logs.** Here is your report:", 
                 file=discord.File(file_bin, filename=f"audit_log_{'all' if is_all else fetch_limit}.txt")
             )
             
         except discord.Forbidden:
-            await message.channel.send("вќЊ **Error:** I don't have the 'View Audit Log' (РџРµСЂРµРіР»СЏРґ Р¶СѓСЂРЅР°Р»Сѓ Р°СѓРґРёС‚Сѓ) permission.")
+            await message.channel.send("❌ **Error:** I don't have the 'View Audit Log' (Перегляд журналу аудиту) permission.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error:** {e}")
+            await message.channel.send(f"❌ **Error:** {e}")
         return
     # -------------------------------------------------------------
 
-    # --- рџ—‘пёЏ РљРћРњРђРќР”Рђ: !del (Р РћР—РЈРњРќР• Р’РР”РђР›Р•РќРќРЇ РўР†Р›Р¬РљР Р—Рђ ID) ---
+    # --- 🗑️ КОМАНДА: !del (РОЗУМНЕ ВИДАЛЕННЯ ТІЛЬКИ ЗА ID) ---
     if message.content.startswith("!del "):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) != 2:
-            return await message.channel.send("вљ пёЏ **Format:** `!del <Message_ID>`")
+            return await message.channel.send("⚠️ **Format:** `!del <Message_ID>`")
             
         try:
             msg_id = int(parts[1])
         except ValueError:
-            return await message.channel.send("вќЊ **Error:** Message ID must be a number.")
+            return await message.channel.send("❌ **Error:** Message ID must be a number.")
             
-        status_msg = await message.channel.send("вЏі **Searching for message across all channels...**")
+        status_msg = await message.channel.send("⏳ **Searching for message across all channels...**")
         
         found_msg = None
         
@@ -3184,25 +3185,25 @@ async def on_message(message):
         if found_msg:
             try:
                 await found_msg.delete()
-                await status_msg.edit(content=f"вњ… **Success!** Message silently deleted in channel `#{found_msg.channel.name}` рџҐ·")
+                await status_msg.edit(content=f"✅ **Success!** Message silently deleted in channel `#{found_msg.channel.name}` 🥷")
             except discord.Forbidden:
-                await status_msg.edit(content="вќЊ **Error:** Found the message, but lack permission to delete it (check Manage Messages).")
+                await status_msg.edit(content="❌ **Error:** Found the message, but lack permission to delete it (check Manage Messages).")
         else:
-            await status_msg.edit(content="вќЊ **Error:** Message with this ID not found on the server (or already deleted).")
+            await status_msg.edit(content="❌ **Error:** Message with this ID not found on the server (or already deleted).")
             
         return
     # -------------------------------------------------------------------------
 
-    # --- рџ§№ РљРћРњРђРќР”Рђ: !clearwow <ID> (РћР§РРЎРўРРўР Р’РЎР† Р Р•РђРљР¦Р†Р‡) ---
+    # --- 🧹 КОМАНДА: !clearwow <ID> (ОЧИСТИТИ ВСІ РЕАКЦІЇ) ---
     if message.content.startswith("!clearwow"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!clearwow <Message_ID>`")
+            return await message.channel.send("⚠️ Usage: `!clearwow <Message_ID>`")
         
         target_id = parts[1]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         found_message = await find_discord_message(int(target_id), message)
         
@@ -3210,135 +3211,135 @@ async def on_message(message):
             try:
                 await found_message.clear_reactions()
                 channel_mention = found_message.channel.mention if hasattr(found_message.channel, 'mention') else "Direct Messages"
-                await message.channel.send(f"вњ… **Cleared all reactions from message in {channel_mention}**")
+                await message.channel.send(f"✅ **Cleared all reactions from message in {channel_mention}**")
             except discord.Forbidden:
-                await message.channel.send("вќЊ **Error:** I don't have 'Manage Messages' permission to clear reactions. Please check role settings.")
+                await message.channel.send("❌ **Error:** I don't have 'Manage Messages' permission to clear reactions. Please check role settings.")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error clearing reactions:** {e}")
+                await message.channel.send(f"❌ **Error clearing reactions:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-	# --- рџ”‡ РљРћРњРђРќР”Рђ: !hideuser <User_ID> <Channel_ID> (РџР РРҐРћР’РђРўР Р®Р—Р•Р Рђ) ---
+	# --- 🔇 КОМАНДА: !hideuser <User_ID> <Channel_ID> (ПРИХОВАТИ ЮЗЕРА) ---
     if message.content.startswith("!hideuser"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ **Р¤РѕСЂРјР°С‚:** `!hideuser <ID_РєРѕСЂРёСЃС‚СѓРІР°С‡Р°> <ID_РєР°РЅР°Р»Сѓ>`")
+            return await message.channel.send("⚠️ **Формат:** `!hideuser <ID_користувача> <ID_каналу>`")
             
         target_user = int(parts[1])
-        target_channel = str(parts[2]) # Р—Р±РµСЂС–РіР°С”РјРѕ СЏРє С‚РµРєСЃС‚ РґР»СЏ JSON
+        target_channel = str(parts[2]) # Зберігаємо як текст для JSON
         
         if target_channel not in HIDDEN_USERS:
             HIDDEN_USERS[target_channel] = []
             
         if target_user not in HIDDEN_USERS[target_channel]:
             HIDDEN_USERS[target_channel].append(target_user)
-            save_hidden_users(HIDDEN_USERS) # рџ”Ґ Р—Р‘Р•Р Р†Р“РђР„РњРћ РЈ Р¤РђР™Р›
-            await message.channel.send(f"рџҐ· **Р“РѕС‚РѕРІРѕ!** РўРµРїРµСЂ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ РІС–Рґ РєРѕСЂРёСЃС‚СѓРІР°С‡Р° `{target_user}` Сѓ РєР°РЅР°Р»С– `{target_channel}` Р±СѓРґСѓС‚СЊ РЅР°Р·Р°РІР¶РґРё РїСЂРёС…РѕРІР°РЅС–.")
+            save_hidden_users(HIDDEN_USERS) # 🔥 ЗБЕРІГАЄМО У ФАЙЛ
+            await message.channel.send(f"🥷 **Готово!** Тепер повідомлення від користувача `{target_user}` у каналі `{target_channel}` будуть назавжди приховані.")
         else:
-            await message.channel.send("вљ пёЏ Р¦РµР№ РєРѕСЂРёСЃС‚СѓРІР°С‡ РІР¶Рµ РїСЂРёС…РѕРІР°РЅРёР№ Сѓ С†СЊРѕРјСѓ РєР°РЅР°Р»С–.")
+            await message.channel.send("⚠️ Цей користувач вже прихований у цьому каналі.")
         return
 
-    # --- рџ”Љ РљРћРњРђРќР”Рђ: !unhideuser <User_ID> <Channel_ID> (РџРћР’Р•Р РќРЈРўР Р®Р—Р•Р Рђ) ---
+    # --- 🔊 КОМАНДА: !unhideuser <User_ID> <Channel_ID> (ПОВЕРНУТИ ЮЗЕРА) ---
     if message.content.startswith("!unhideuser"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ **Р¤РѕСЂРјР°С‚:** `!unhideuser <ID_РєРѕСЂРёСЃС‚СѓРІР°С‡Р°> <ID_РєР°РЅР°Р»Сѓ>`")
+            return await message.channel.send("⚠️ **Формат:** `!unhideuser <ID_користувача> <ID_каналу>`")
             
         target_user = int(parts[1])
         target_channel = str(parts[2])
         
         if target_channel in HIDDEN_USERS and target_user in HIDDEN_USERS[target_channel]:
             HIDDEN_USERS[target_channel].remove(target_user)
-            # РЇРєС‰Рѕ СЃРїРёСЃРѕРє РїРѕСЂРѕР¶РЅС–Р№, РїС–РґС‡РёС‰Р°С”РјРѕ РєР°РЅР°Р» Р· Р±Р°Р·Рё
+            # Якщо список порожній, підчищаємо канал з бази
             if not HIDDEN_USERS[target_channel]:
                 del HIDDEN_USERS[target_channel]
                 
-            save_hidden_users(HIDDEN_USERS) # рџ”Ґ Р—Р‘Р•Р Р†Р“РђР„РњРћ РЈ Р¤РђР™Р›
-            await message.channel.send(f"вњ… **Р—РЅСЏС‚Рѕ!** РљРѕСЂРёСЃС‚СѓРІР°С‡ `{target_user}` Р·РЅРѕРІСѓ РјРѕР¶Рµ РїРёСЃР°С‚Рё РІ РєР°РЅР°Р» `{target_channel}`.")
+            save_hidden_users(HIDDEN_USERS) # 🔥 ЗБЕРІГАЄМО У ФАЙЛ
+            await message.channel.send(f"✅ **Знято!** Користувач `{target_user}` знову може писати в канал `{target_channel}`.")
         else:
-            await message.channel.send("вљ пёЏ Р¦СЊРѕРіРѕ РєРѕСЂРёСЃС‚СѓРІР°С‡Р° РЅРµ Р±СѓР»Рѕ РІ СЃРїРёСЃРєСѓ РїСЂРёС…РѕРІР°РЅРёС… РґР»СЏ С†СЊРѕРіРѕ РєР°РЅР°Р»Сѓ.")
+            await message.channel.send("⚠️ Цього користувача не було в списку прихованих для цього каналу.")
         return
 
-    # --- рџ›ЎпёЏ РљРћРњРђРќР”Рђ: !banwow <ID> (Р—РђР‘РћР РћРќРРўР РЎРњРђР™Р›Р) ---
+    # --- 🛡️ КОМАНДА: !banwow <ID> (ЗАБОРОНИТИ СМАЙЛИ) ---
     if message.content.startswith("!banwow"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            return await message.channel.send("вљ пёЏ Usage: `!banwow <Message_ID>`")
+            return await message.channel.send("⚠️ Usage: `!banwow <Message_ID>`")
         
         msg_id = int(parts[1])
         BANNED_WOW_MESSAGES.add(msg_id)
-        await message.channel.send(f"рџ›ЎпёЏ **Message {msg_id} is now protected!**\nAny new reactions will be instantly deleted.")
+        await message.channel.send(f"🛡️ **Message {msg_id} is now protected!**\nAny new reactions will be instantly deleted.")
         return
 
-    # --- рџџў РљРћРњРђРќР”Рђ: !unbanwow <ID> (Р”РћР—Р’РћР›РРўР РЎРњРђР™Р›Р) ---
+    # --- 🟢 КОМАНДА: !unbanwow <ID> (ДОЗВОЛИТИ СМАЙЛИ) ---
     if message.content.startswith("!unbanwow"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            return await message.channel.send("вљ пёЏ Usage: `!unbanwow <Message_ID>`")
+            return await message.channel.send("⚠️ Usage: `!unbanwow <Message_ID>`")
         
         msg_id = int(parts[1])
         if msg_id in BANNED_WOW_MESSAGES:
             BANNED_WOW_MESSAGES.remove(msg_id)
-            await message.channel.send(f"вњ… **Protection removed.** You can now react to message {msg_id} again.")
+            await message.channel.send(f"✅ **Protection removed.** You can now react to message {msg_id} again.")
         else:
-            await message.channel.send("вљ пёЏ This message is not currently blacklisted.")
+            await message.channel.send("⚠️ This message is not currently blacklisted.")
         return
     
-	# --- рџ‘№ РљРћРњРђРќР”Рђ: !wow <ID> <EMOJI> (РЎРўРђР’РРўР Р Р•РђРљР¦Р†Р®) ---
+	# --- 👹 КОМАНДА: !wow <ID> <EMOJI> (СТАВИТИ РЕАКЦІЮ) ---
     if message.content.startswith("!wow"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ Usage: `!wow <Message_ID> <Emoji>`")
+            return await message.channel.send("⚠️ Usage: `!wow <Message_ID> <Emoji>`")
         
         target_id = parts[1]
         emoji_input = parts[2]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         found_message = await find_discord_message(int(target_id), message)
         
         if found_message:
             reaction_emoji = emoji_input
             
-            # рџ”Ґ РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С†Рµ РџР РћРЎРўРћ РќРђР—Р’Рђ (С‚С–Р»СЊРєРё Р±СѓРєРІРё, С†РёС„СЂРё С‚Р° РЅРёР¶РЅС” РїС–РґРєСЂРµСЃР»РµРЅРЅСЏ)
+            # 🔥 Перевіряємо, чи це ПРОСТО НАЗВА (тільки букви, цифри та нижнє підкреслення)
             if re.match(r"^[a-zA-Z0-9_]+$", emoji_input):
-                # РЇРєС‰Рѕ РєРѕРјР°РЅРґСѓ РЅР°РїРёСЃР°Р»Рё РЅР° СЃРµСЂРІРµСЂС– вЂ” С€СѓРєР°С”РјРѕ РЅР° С†СЊРѕРјСѓ Р¶ СЃРµСЂРІРµСЂС–
+                # Якщо команду написали на сервері — шукаємо на цьому ж сервері
                 if message.guild:
                     found_emoji = discord.utils.get(message.guild.emojis, name=emoji_input)
                     if found_emoji:
                         reaction_emoji = found_emoji
                     else:
-                        return await message.channel.send(f"вќЊ **Р•РјРѕРґР·С– `{emoji_input}` РЅРµ Р·РЅР°Р№РґРµРЅРѕ РЅР° С†СЊРѕРјСѓ СЃРµСЂРІРµСЂС–!**")
+                        return await message.channel.send(f"❌ **Емодзі `{emoji_input}` не знайдено на цьому сервері!**")
                 else:
-                    # РЇРєС‰Рѕ РєРѕРјР°РЅРґСѓ РЅР°РїРёСЃР°Р»Рё РІ РџРџ (С‚СѓС‚ РЅРµРјР°С” Р±Р°Р·Рё РєР°СЃС‚РѕРјРЅРёС… РµРјРѕРґР·С–)
-                    return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** Р’ РѕСЃРѕР±РёСЃС‚РёС… РїРѕРІС–РґРѕРјР»РµРЅРЅСЏС… РЅРµ РјРѕР¶РЅР° С€СѓРєР°С‚Рё РєР°СЃС‚РѕРјРЅС– РµРјРѕРґР·С– Р·Р° РЅР°Р·РІРѕСЋ. Р’С–РґРїСЂР°РІ СЃС‚Р°РЅРґР°СЂС‚РЅРёР№ СЃРјР°Р№Р»РёРє Р°Р±Рѕ Р№РѕРіРѕ РїРѕРІРЅРёР№ РєРѕРґ `<:name:ID>`.")
+                    # Якщо команду написали в ПП (тут немає бази кастомних емодзі)
+                    return await message.channel.send("❌ **Помилка:** В особистих повідомленнях не можна шукати кастомні емодзі за назвою. Відправ стандартний смайлик або його повний код `<:name:ID>`.")
 
             try:
                 await found_message.add_reaction(reaction_emoji)
                 channel_mention = found_message.channel.mention if hasattr(found_message.channel, 'mention') else "Direct Messages"
-                await message.channel.send(f"вњ… **Reacted {reaction_emoji} to message in {channel_mention}**")
+                await message.channel.send(f"✅ **Reacted {reaction_emoji} to message in {channel_mention}**")
             except discord.HTTPException as e:
                 if e.status == 400:
-                    await message.channel.send(f"вќЊ **РџРѕРјРёР»РєР°:** РќРµРїСЂР°РІРёР»СЊРЅРёР№ С„РѕСЂРјР°С‚ РµРјРѕРґР·С– Р°Р±Рѕ Р±РѕС‚ РЅРµ РјР°С” РґРѕ РЅСЊРѕРіРѕ РґРѕСЃС‚СѓРїСѓ.")
+                    await message.channel.send(f"❌ **Помилка:** Неправильний формат емодзі або бот не має до нього доступу.")
                 else:
-                    await message.channel.send(f"вќЊ **Error adding reaction:** {e}")
+                    await message.channel.send(f"❌ **Error adding reaction:** {e}")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error adding reaction:** {e}")
+                await message.channel.send(f"❌ **Error adding reaction:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-    # --- рџ’Ѕ РљРћРњРђРќР”Рђ: !disk (Р Р•РђР›Р¬РќРђ РџРђРњ'РЇРўР¬ Р‘РћРўРђ) ---
+    # --- 💽 КОМАНДА: !disk (РЕАЛЬНА ПАМ'ЯТЬ БОТА) ---
     if message.content == "!disk":
         def get_size(path="."):
             total = 0
@@ -3358,7 +3359,7 @@ async def on_message(message):
         free_mb = LIMIT_MB - temp_used_mb
         
         text = (
-            f"рџ’Ѕ **Bot's Real Memory Stats:**\n"
+            f"💽 **Bot's Real Memory Stats:**\n"
             f"**Available Limit:** {LIMIT_MB} MB (1 GB)\n"
             f"**Currently Used:** {temp_used_mb:.2f} MB\n"
             f"**FREE TO WRITE:** {free_mb:.2f} MB\n"
@@ -3367,184 +3368,184 @@ async def on_message(message):
         return await message.channel.send(text)
     # -------------------------------------------------------------
 
-	# --- рџ“‹ РљРћРњРђРќР”Рђ: !chlist (РЎРџРРЎРћРљ Р’РЎР†РҐ РљРђРќРђР›Р†Р’) ---
+	# --- 📋 КОМАНДА: !chlist (СПИСОК ВСІХ КАНАЛІВ) ---
     if message.content == "!chlist":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         main_channel = client.get_channel(CHANNEL_ID)
         if not main_channel:
-            return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** РќРµ РІРґР°Р»РѕСЃСЏ Р·РЅР°Р№С‚Рё РіРѕР»РѕРІРЅРёР№ СЃРµСЂРІРµСЂ (РїРµСЂРµРІС–СЂ CHANNEL_ID).")
+            return await message.channel.send("❌ **Помилка:** Не вдалося знайти головний сервер (перевір CHANNEL_ID).")
         
         guild = main_channel.guild
-        await message.channel.send(f"вЏі **Р—Р±РёСЂР°СЋ СЃРїРёСЃРѕРє РєР°РЅР°Р»С–РІ СЃРµСЂРІРµСЂР° `{guild.name}`...**")
+        await message.channel.send(f"⏳ **Збираю список каналів сервера `{guild.name}`...**")
         
-        lines = [f"=== РЎРїРёСЃРѕРє РєР°РЅР°Р»С–РІ СЃРµСЂРІРµСЂР°: {guild.name} ===\n"]
+        lines = [f"=== Список каналів сервера: {guild.name} ===\n"]
         
-        # РЎРїРѕС‡Р°С‚РєСѓ РєР°С‚РµРіРѕСЂС–С— С‚Р° РєР°РЅР°Р»Рё РІСЃРµСЂРµРґРёРЅС– РЅРёС…
+        # Спочатку категорії та канали всередині них
         for category in guild.categories:
-            lines.append(f"рџ“‚ [РљР°С‚РµРіРѕСЂС–СЏ] {category.name} (ID: {category.id})")
+            lines.append(f"📂 [Категорія] {category.name} (ID: {category.id})")
             for ch in category.channels:
-                lines.append(f"   в”њв”Ђ [{ch.type.name.upper()}] {ch.name} (ID: {ch.id})")
+                lines.append(f"   ├─ [{ch.type.name.upper()}] {ch.name} (ID: {ch.id})")
             lines.append("")
             
-        # РљР°РЅР°Р»Рё Р±РµР· РєР°С‚РµРіРѕСЂС–Р№ (СЏРєС‰Рѕ С‚Р°РєС– С”)
+        # Канали без категорій (якщо такі є)
         uncategorized = [ch for ch in guild.channels if ch.category is None]
         if uncategorized:
-            lines.append("рџ“Ѓ [Р‘РµР· РєР°С‚РµРіРѕСЂС–С—]")
+            lines.append("📁 [Без категорії]")
             for ch in uncategorized:
-                lines.append(f"   в”њв”Ђ [{ch.type.name.upper()}] {ch.name} (ID: {ch.id})")
+                lines.append(f"   ├─ [{ch.type.name.upper()}] {ch.name} (ID: {ch.id})")
                 
         file_bin = io.BytesIO("\n".join(lines).encode('utf-8'))
         await message.channel.send(
-            content=f"вњ… **Р“РѕС‚РѕРІРѕ! Р—РЅР°Р№РґРµРЅРѕ {len(guild.channels)} РєР°РЅР°Р»С–РІ.**",
+            content=f"✅ **Готово! Знайдено {len(guild.channels)} каналів.**",
             file=discord.File(file_bin, filename="channel_list.txt")
         )
         return
 
-    # --- рџ“Ґ РљРћРњРђРќР”Рђ: !chview <ID> (Р’РРљРђР§РђРўР Р†РЎРўРћР Р†Р® РљРђРќРђР›РЈ) ---
+    # --- 📥 КОМАНДА: !chview <ID> (ВИКАЧАТИ ІСТОРІЮ КАНАЛУ) ---
     if message.content.startswith("!chview"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            return await message.channel.send("вљ пёЏ **Р¤РѕСЂРјР°С‚:** `!chview <Channel_ID>`")
+            return await message.channel.send("⚠️ **Формат:** `!chview <Channel_ID>`")
             
         target_id = int(parts[1])
         main_channel = client.get_channel(CHANNEL_ID)
         guild = main_channel.guild if main_channel else None
         
         if not guild:
-            return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** РќРµ РІРґР°Р»РѕСЃСЏ Р·РЅР°Р№С‚Рё РіРѕР»РѕРІРЅРёР№ СЃРµСЂРІРµСЂ.")
+            return await message.channel.send("❌ **Помилка:** Не вдалося знайти головний сервер.")
             
-        # Р—РЅР°С…РѕРґРёРјРѕ РєР°РЅР°Р»
+        # Знаходимо канал
         target_channel = guild.get_channel(target_id)
         if not target_channel:
             try:
                 target_channel = await guild.fetch_channel(target_id)
             except:
-                return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** РљР°РЅР°Р» Р· С‚Р°РєРёРј ID РЅРµ Р·РЅР°Р№РґРµРЅРѕ.")
+                return await message.channel.send("❌ **Помилка:** Канал з таким ID не знайдено.")
                 
-        # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё РјРѕР¶РЅР° РІ РЅСЊРѕРјСѓ РІР·Р°РіР°Р»С– С‡РёС‚Р°С‚Рё РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ
+        # Перевіряємо, чи можна в ньому взагалі читати повідомлення
         if not hasattr(target_channel, 'history'):
-            return await message.channel.send("вќЊ **РџРѕРјРёР»РєР°:** Р¦РµР№ С‚РёРї РєР°РЅР°Р»Сѓ РЅРµ РїС–РґС‚СЂРёРјСѓС” С–СЃС‚РѕСЂС–СЋ РїРѕРІС–РґРѕРјР»РµРЅСЊ (РЅР°РїСЂРёРєР»Р°Рґ, С†Рµ РіРѕР»РѕСЃРѕРІРёР№ РєР°РЅР°Р» Р±РµР· С‡Р°С‚Сѓ).")
+            return await message.channel.send("❌ **Помилка:** Цей тип каналу не підтримує історію повідомлень (наприклад, це голосовий канал без чату).")
             
-        status_msg = await message.channel.send(f"вЏі **Р’РёРєР°С‡СѓСЋ С–СЃС‚РѕСЂС–СЋ Р· РєР°РЅР°Р»Сѓ `{target_channel.name}`...** Р¦Рµ РјРѕР¶Рµ Р·Р°Р№РЅСЏС‚Рё РґРµСЏРєРёР№ С‡Р°СЃ.")
+        status_msg = await message.channel.send(f"⏳ **Викачую історію з каналу `{target_channel.name}`...** Це може зайняти деякий час.")
         
         try:
-            lines = [f"=== Р†СЃС‚РѕСЂС–СЏ РїРѕРІС–РґРѕРјР»РµРЅСЊ РєР°РЅР°Р»Сѓ: {target_channel.name} (ID: {target_id}) ===\n"]
+            lines = [f"=== Історія повідомлень каналу: {target_channel.name} (ID: {target_id}) ===\n"]
             count = 0
             
-            # oldest_first=True РІРёРєР°С‡СѓС” РІС–Рґ РЅР°Р№СЃС‚Р°СЂС–С€РёС… РїРѕРІС–РґРѕРјР»РµРЅСЊ РґРѕ РЅР°Р№РЅРѕРІС–С€РёС…
+            # oldest_first=True викачує від найстаріших повідомлень до найновіших
             async for msg in target_channel.history(limit=None, oldest_first=True):
                 time_str = msg.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
                 author = msg.author.name
                 
-                # Р—Р°РјС–РЅСЋС”РјРѕ РїРµСЂРµРЅРѕСЃРё СЂСЏРґРєС–РІ РЅР° РїСЂРѕР±С–Р»Рё, С‰РѕР± РѕРґРЅРµ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ Р·Р°Р№РјР°Р»Рѕ РѕРґРёРЅ СЂСЏРґРѕРє Сѓ С„Р°Р№Р»С–
+                # Замінюємо переноси рядків на пробіли, щоб одне повідомлення займало один рядок у файлі
                 content = msg.content.replace('\n', ' ') 
                 
                 lines.append(f"[{time_str}] {author}: {content}")
                 
-                # РЇРєС‰Рѕ С” РІРєР»Р°РґРµРЅРЅСЏ (С„РѕС‚Рѕ, С„Р°Р№Р»Рё), Р·Р±РµСЂС–РіР°С”РјРѕ РїРѕСЃРёР»Р°РЅРЅСЏ РЅР° РЅРёС…
+                # Якщо є вкладення (фото, файли), зберігаємо посилання на них
                 for att in msg.attachments:
-                    lines.append(f"   рџ“Ћ [Р’РєР»Р°РґРµРЅРЅСЏ]: {att.url}")
+                    lines.append(f"   📎 [Вкладення]: {att.url}")
                     
                 count += 1
                 if count % 1000 == 0:
-                    await status_msg.edit(content=f"вЏі **Р’РёРєР°С‡СѓСЋ... Р’Р¶Рµ РѕР±СЂРѕР±Р»РµРЅРѕ {count} РїРѕРІС–РґРѕРјР»РµРЅСЊ.**")
+                    await status_msg.edit(content=f"⏳ **Викачую... Вже оброблено {count} повідомлень.**")
                     
             if count == 0:
-                return await status_msg.edit(content="вњ… **РљР°РЅР°Р» Р°Р±СЃРѕР»СЋС‚РЅРѕ РїРѕСЂРѕР¶РЅС–Р№.**")
+                return await status_msg.edit(content="✅ **Канал абсолютно порожній.**")
                 
             file_bin = io.BytesIO("\n".join(lines).encode('utf-8'))
             
             await status_msg.delete()
             await message.channel.send(
-                content=f"вњ… **Р“РѕС‚РѕРІРѕ! Р’РёРєР°С‡Р°РЅРѕ {count} РїРѕРІС–РґРѕРјР»РµРЅСЊ Р· `#{target_channel.name}`.**",
+                content=f"✅ **Готово! Викачано {count} повідомлень з `#{target_channel.name}`.**",
                 file=discord.File(file_bin, filename=f"export_{target_channel.name}.txt")
             )
             
         except discord.Forbidden:
-            await status_msg.edit(content="вќЊ **РџРѕРјРёР»РєР°:** РЈ Р±РѕС‚Р° РЅРµРјР°С” РїСЂР°РІ РЅР° С‡РёС‚Р°РЅРЅСЏ С–СЃС‚РѕСЂС–С— С†СЊРѕРіРѕ РєР°РЅР°Р»Сѓ.")
+            await status_msg.edit(content="❌ **Помилка:** У бота немає прав на читання історії цього каналу.")
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РЎС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР°:** {e}")
+            await status_msg.edit(content=f"❌ **Сталася помилка:** {e}")
             
         return
     # -------------------------------------------------------------
 
-	# --- рџ”Ќ РљРћРњРђРќР”Рђ: !idemoji <РЅР°Р·РІР°> (Р”Р†Р—РќРђРўРРЎРЇ РљРћР” Р•РњРћР”Р—Р†) ---
+	# --- 🔍 КОМАНДА: !idemoji <назва> (ДІЗНАТИСЯ КОД ЕМОДЗІ) ---
     if message.content.startswith("!idemoji"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!idemoji <name>` (without colons)")
+            return await message.channel.send("⚠️ Usage: `!idemoji <name>` (without colons)")
         
         if not message.guild:
-            return await message.channel.send("вљ пёЏ Please use this command in a server channel, not in DM.")
+            return await message.channel.send("⚠️ Please use this command in a server channel, not in DM.")
 
-        emoji_name = parts[1].replace(":", "") # РџСЂРёР±РёСЂР°С”РјРѕ РґРІРѕРєСЂР°РїРєРё, СЏРєС‰Рѕ РІРёРїР°РґРєРѕРІРѕ РЅР°РїРёСЃР°РІ
+        emoji_name = parts[1].replace(":", "") # Прибираємо двокрапки, якщо випадково написав
         
-        # РЁСѓРєР°С”РјРѕ РµРјРѕРґР·С– РЅР° СЃРµСЂРІРµСЂС–
+        # Шукаємо емодзі на сервері
         found_emoji = discord.utils.get(message.guild.emojis, name=emoji_name)
         
         if found_emoji:
-            # Р¤РѕСЂРјСѓС”РјРѕ РїСЂР°РІРёР»СЊРЅРёР№ РєРѕРґ (Р· 'a', СЏРєС‰Рѕ Р°РЅС–РјРѕРІР°РЅРёР№)
+            # Формуємо правильний код (з 'a', якщо анімований)
             emoji_code = f"<{'a' if found_emoji.animated else ''}:{found_emoji.name}:{found_emoji.id}>"
-            await message.channel.send(f"вњ… **Found it!**\nCopy this code:\n`{emoji_code}`\n\nPreview: {emoji_code}")
+            await message.channel.send(f"✅ **Found it!**\nCopy this code:\n`{emoji_code}`\n\nPreview: {emoji_code}")
         else:
-            await message.channel.send(f"вќЊ **Error:** Emoji named `{emoji_name}` not found on this server.")
+            await message.channel.send(f"❌ **Error:** Emoji named `{emoji_name}` not found on this server.")
         return
     # -------------------------------------------------------------
 
-	# --- рџ–јпёЏ РљРћРњРђРќР”Рђ: !avatar <User_ID> (РЎРљРђР§РђРўР РђР’РђРўРђР РљРЈ РљРћР РРЎРўРЈР’РђР§Рђ) ---
+	# --- 🖼️ КОМАНДА: !avatar <User_ID> (СКАЧАТИ АВАТАРКУ КОРИСТУВАЧА) ---
     if message.content.startswith("!avatar"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ **Р¤РѕСЂРјР°С‚:** `!avatar <User_ID>`")
+            return await message.channel.send("⚠️ **Формат:** `!avatar <User_ID>`")
             
         target_id_str = parts[1]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ **РџРѕРјРёР»РєР°:** ID РєРѕСЂРёСЃС‚СѓРІР°С‡Р° РјР°С” Р±СѓС‚Рё С‡РёСЃР»РѕРј.")
+             return await message.channel.send("⚠️ **Помилка:** ID користувача має бути числом.")
              
         target_user_id = int(target_id_str)
         
-        status_msg = await message.channel.send("вЏі **РЁСѓРєР°СЋ РєРѕСЂРёСЃС‚СѓРІР°С‡Р° С‚Р° Р·Р°РІР°РЅС‚Р°Р¶СѓСЋ Р°РІР°С‚Р°СЂРєСѓ...**")
+        status_msg = await message.channel.send("⏳ **Шукаю користувача та завантажую аватарку...**")
         
         try:
-            # РЁСѓРєР°С”РјРѕ РєРѕСЂРёСЃС‚СѓРІР°С‡Р° РіР»РѕР±Р°Р»СЊРЅРѕ С‡РµСЂРµР· API Discord
+            # Шукаємо користувача глобально через API Discord
             target_user = await client.fetch_user(target_user_id)
             
-            # Р‘РµСЂРµРјРѕ Р°РІР°С‚Р°СЂРєСѓ (display_avatar Р°РІС‚РѕРјР°С‚РёС‡РЅРѕ РІС–РґРґР°С” РєР°СЃС‚РѕРјРЅСѓ Р°Р±Рѕ РґРµС„РѕР»С‚РЅСѓ)
+            # Беремо аватарку (display_avatar автоматично віддає кастомну або дефолтну)
             avatar_asset = target_user.display_avatar
             
-            # РЎРєР°С‡СѓС”РјРѕ РєР°СЂС‚РёРЅРєСѓ РІ РѕРїРµСЂР°С‚РёРІРЅСѓ РїР°Рј'СЏС‚СЊ (СЏРє Р±Р°Р№С‚Рё)
+            # Скачуємо картинку в оперативну пам'ять (як байти)
             avatar_bytes = await avatar_asset.read()
             
-            # РџРµСЂРµС‚РІРѕСЂСЋС”РјРѕ Р±Р°Р№С‚Рё РЅР° С„Р°Р№Р» РґР»СЏ РІС–РґРїСЂР°РІРєРё РІ Discord
+            # Перетворюємо байти на файл для відправки в Discord
             image_file = discord.File(io.BytesIO(avatar_bytes), filename=f"avatar_{target_user.name}.png")
             
-            # РЎС‚РІРѕСЂСЋС”РјРѕ РіР°СЂРЅРёР№ Embed, С‰РѕР± РїСЂРёРєСЂС–РїРёС‚Рё С‚СѓРґРё С†СЋ С„РѕС‚РєСѓ
+            # Створюємо гарний Embed, щоб прикріпити туди цю фотку
             embed = discord.Embed(
-                title=f"рџ–јпёЏ РђРІР°С‚Р°СЂРєР°: {target_user.display_name}", 
-                description=f"**РќС–РєРЅРµР№Рј:** `{target_user.name}`\n**ID:** `{target_user.id}`",
+                title=f"🖼️ Аватарка: {target_user.display_name}", 
+                description=f"**Нікнейм:** `{target_user.name}`\n**ID:** `{target_user.id}`",
                 color=0x3498db
             )
-            # РџСЂРёРІ'СЏР·СѓС”РјРѕ С„Р°Р№Р» РґРѕ Embed
+            # Прив'язуємо файл до Embed
             embed.set_image(url=f"attachment://avatar_{target_user.name}.png")
             
-            # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ Р· С„Р°Р№Р»РѕРј С– РІРёРґР°Р»СЏС”РјРѕ "РіРѕРґРёРЅРЅРёРє"
+            # Відправляємо повідомлення з файлом і видаляємо "годинник"
             await message.channel.send(embed=embed, file=image_file)
             await status_msg.delete()
             
         except discord.NotFound:
-            await status_msg.edit(content="вќЊ **РџРѕРјРёР»РєР°:** РљРѕСЂРёСЃС‚СѓРІР°С‡Р° Р· С‚Р°РєРёРј ID РЅРµ Р·РЅР°Р№РґРµРЅРѕ РІ Discord.")
+            await status_msg.edit(content="❌ **Помилка:** Користувача з таким ID не знайдено в Discord.")
         except Exception as e:
-            await status_msg.edit(content=f"вќЊ **РџРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ Р·Р°РІР°РЅС‚Р°Р¶РµРЅРЅСЏ:** {e}")
+            await status_msg.edit(content=f"❌ **Помилка під час завантаження:** {e}")
         return
     # -------------------------------------------------------------
 
-    # --- рџ“‚ РљРћРњРђРќР”Рђ: !files (Р’РњР†РЎРў РџРћРЎРўР†Р™РќРћР‡ РџРђРњ'РЇРўР† / VOLUME) ---
+    # --- 📂 КОМАНДА: !files (ВМІСТ ПОСТІЙНОЇ ПАМ'ЯТІ / VOLUME) ---
     if message.content == "!files":
         folder_path = "/app/data"
         
@@ -3552,61 +3553,61 @@ async def on_message(message):
             files = os.listdir(folder_path)
             
             if len(files) > 0:
-                file_list = "\n".join([f"рџ“„ {file}" for file in files])
-                await message.channel.send(f"рџ“‚ **Contents of persistent folder `{folder_path}`:**\n```text\n{file_list}\n```")
+                file_list = "\n".join([f"📄 {file}" for file in files])
+                await message.channel.send(f"📂 **Contents of persistent folder `{folder_path}`:**\n```text\n{file_list}\n```")
             else:
-                await message.channel.send(f"рџ“‚ Folder `{folder_path}` is currently completely empty.")
+                await message.channel.send(f"📂 Folder `{folder_path}` is currently completely empty.")
         else:
-            await message.channel.send(f"вќЊ Error: Folder `{folder_path}` does not exist! Volume is not attached or the path is incorrect.")
+            await message.channel.send(f"❌ Error: Folder `{folder_path}` does not exist! Volume is not attached or the path is incorrect.")
         return
 
-# --- рџ—‘пёЏ РљРћРњРђРќР”Рђ: !unwow <ID> <EMOJI> (РџР РР‘Р РђРўР Р Р•РђРљР¦Р†Р®) ---
+# --- 🗑️ КОМАНДА: !unwow <ID> <EMOJI> (ПРИБРАТИ РЕАКЦІЮ) ---
     if message.content.startswith("!unwow"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ Usage: `!unwow <Message_ID> <Emoji>`")
+            return await message.channel.send("⚠️ Usage: `!unwow <Message_ID> <Emoji>`")
         
         target_id = parts[1]
         emoji_input = parts[2]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         found_message = await find_discord_message(int(target_id), message)
         
         if found_message:
-            # рџ”Ґ Р”РћР”РђРўРљРћР’Рћ: РЁСѓРєР°С”РјРѕ РµРјРѕРґР·С–, СЏРєС‰Рѕ РїРµСЂРµРґР°РЅР° С‚С–Р»СЊРєРё РЅР°Р·РІР°
+            # 🔥 ДОДАТКОВО: Шукаємо емодзі, якщо передана тільки назва
             reaction_emoji = emoji_input
             if ":" not in emoji_input and not emoji_input.startswith("<"):
                 found_emoji = discord.utils.get(message.guild.emojis, name=emoji_input)
                 if found_emoji:
                     reaction_emoji = found_emoji
                 else:
-                    return await message.channel.send(f"вќЊ **Р•РјРѕРґР·С– `{emoji_input}` РЅРµ Р·РЅР°Р№РґРµРЅРѕ РЅР° С†СЊРѕРјСѓ СЃРµСЂРІРµСЂС–!**")
+                    return await message.channel.send(f"❌ **Емодзі `{emoji_input}` не знайдено на цьому сервері!**")
 
             try:
-                # Р’РёРґР°Р»СЏС”РјРѕ СЂРµР°РєС†С–СЋ СЃР°РјРµ РІС–Рґ Р±РѕС‚Р° (client.user)
+                # Видаляємо реакцію саме від бота (client.user)
                 await found_message.remove_reaction(reaction_emoji, client.user)
-                await message.channel.send(f"вњ… **Removed {reaction_emoji} from message in {found_message.channel.mention}**")
+                await message.channel.send(f"✅ **Removed {reaction_emoji} from message in {found_message.channel.mention}**")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error removing reaction:** {e}")
+                await message.channel.send(f"❌ **Error removing reaction:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-    # --- рџ’¬ РќРћР’Рђ РљРћРњРђРќР”Рђ: !reply <ID> <text> (Р’Р†Р”РџРћР’Р†РЎРўР РќРђ РџРћР’Р†Р”РћРњР›Р•РќРќРЇ) ---
+    # --- 💬 НОВА КОМАНДА: !reply <ID> <text> (ВІДПОВІСТИ НА ПОВІДОМЛЕННЯ) ---
     if message.content.startswith("!reply"):
         if not is_admin: 
-            return await message.channel.send("рџљ« **Access Denied**")
+            return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ Usage: `!reply <Message_ID> <text>`")
+            return await message.channel.send("⚠️ Usage: `!reply <Message_ID> <text>`")
         
         target_id = parts[1]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         content = " ".join(parts[2:])
         found_message = await find_discord_message(int(target_id), message)
@@ -3614,77 +3615,77 @@ async def on_message(message):
         if found_message:
             try:
                 sent_msg = await found_message.reply(content)
-                last_sent_message = sent_msg # рџ”Ґ Р—Р±РµСЂС–РіР°С”РјРѕ РґР»СЏ РєРѕРјР°РЅРґРё !undo
-                await message.channel.send(f"вњ… **Replied to message in {found_message.channel.mention}:**\n{content}")
+                last_sent_message = sent_msg # 🔥 Зберігаємо для команди !undo
+                await message.channel.send(f"✅ **Replied to message in {found_message.channel.mention}:**\n{content}")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error replying:** {e}")
+                await message.channel.send(f"❌ **Error replying:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-    # --- рџ”Ё РљРћРњРђРќР”Рђ: !ban <0|1> <User_ID> [reason] (Р‘РђРќ РљРћР РРЎРўРЈР’РђР§Рђ РќРђ РЎР•Р Р’Р•Р Р†) ---
+    # --- 🔨 КОМАНДА: !ban <0|1> <User_ID> [reason] (БАН КОРИСТУВАЧА НА СЕРВЕРІ) ---
     if message.content.startswith("!ban ") or message.content == "!ban":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         
-        # РўРµРїРµСЂ РЅР°Рј РїРѕС‚СЂС–Р±РЅРѕ РјС–РЅС–РјСѓРј 3 С‡Р°СЃС‚РёРЅРё: !ban, РїСЂР°РїРѕСЂРµС†СЊ (0/1) С‚Р° ID
+        # Тепер нам потрібно мінімум 3 частини: !ban, прапорець (0/1) та ID
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ Usage: `!ban <0 Р°Р±Рѕ 1> <User_ID> [reason]`\n*(0 = Р·Р±РµСЂРµРіС‚Рё РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ, 1 = РІРёРґР°Р»РёС‚Рё Р·Р° РѕСЃС‚Р°РЅРЅС– 24 РіРѕРґ)*")
+            return await message.channel.send("⚠️ Usage: `!ban <0 або 1> <User_ID> [reason]`\n*(0 = зберегти повідомлення, 1 = видалити за останні 24 год)*")
         
         delete_flag = parts[1]
         if delete_flag not in ["0", "1"]:
-            return await message.channel.send("вљ пёЏ РџРѕРјРёР»РєР°: РџРµСЂС€РёРј РїР°СЂР°РјРµС‚СЂРѕРј РїС–СЃР»СЏ РєРѕРјР°РЅРґРё РјР°С” Р±СѓС‚Рё `0` Р°Р±Рѕ `1`.")
+            return await message.channel.send("⚠️ Помилка: Першим параметром після команди має бути `0` або `1`.")
             
         target_id_str = parts[2]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ User ID must be a number.")
+             return await message.channel.send("⚠️ User ID must be a number.")
         
         target_user_id = int(target_id_str)
 
-        # РџСЂРёС‡РёРЅР° С‚РµРїРµСЂ РїРѕС‡РёРЅР°С”С‚СЊСЃСЏ Р· 4-РіРѕ СЃР»РѕРІР° (С–РЅРґРµРєСЃ 3)
+        # Причина тепер починається з 4-го слова (індекс 3)
         ban_reason = " ".join(parts[3:]) if len(parts) > 3 else None
         
-        # 86400 СЃРµРєСѓРЅРґ = 24 РіРѕРґРёРЅРё
+        # 86400 секунд = 24 години
         del_seconds = 86400 if delete_flag == "1" else 0
 
         main_channel = client.get_channel(CHANNEL_ID)
         if not main_channel:
-            return await message.channel.send("вќЊ **Error:** Cannot find the main server. Check CHANNEL_ID.")
+            return await message.channel.send("❌ **Error:** Cannot find the main server. Check CHANNEL_ID.")
         
         guild = main_channel.guild
         
         try:
             user_to_ban = discord.Object(id=target_user_id)
-            # РЇРєС‰Рѕ ban_reason = None, Discord РїСЂРѕСЃС‚Рѕ РЅРµ Р·Р°РїРёС€Рµ РїСЂРёС‡РёРЅСѓ РІ Р¶СѓСЂРЅР°Р» Р°СѓРґРёС‚Сѓ
+            # Якщо ban_reason = None, Discord просто не запише причину в журнал аудиту
             await guild.ban(user_to_ban, reason=ban_reason, delete_message_seconds=del_seconds)
             
             reason_text = f" for: {ban_reason}" if ban_reason else ""
-            msg_status = "(РџРѕРІС–РґРѕРјР»РµРЅРЅСЏ Р·Р±РµСЂРµР¶РµРЅРѕ)" if del_seconds == 0 else "(РџРѕРІС–РґРѕРјР»РµРЅРЅСЏ Р·Р° РѕСЃС‚Р°РЅРЅС– 24 РіРѕРґ РІРёРґР°Р»РµРЅРѕ)"
+            msg_status = "(Повідомлення збережено)" if del_seconds == 0 else "(Повідомлення за останні 24 год видалено)"
             
-            await message.channel.send(f"вњ… **User {target_user_id} has been banned{reason_text}.**\n{msg_status}")
+            await message.channel.send(f"✅ **User {target_user_id} has been banned{reason_text}.**\n{msg_status}")
         except discord.Forbidden:
-            await message.channel.send("вќЊ **Error:** I don't have the 'Ban Members' permission, or my role is lower than the target's role.")
+            await message.channel.send("❌ **Error:** I don't have the 'Ban Members' permission, or my role is lower than the target's role.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error banning user:** {e}")
+            await message.channel.send(f"❌ **Error banning user:** {e}")
         return
     # -------------------------------------------------------------
 
-    # --- рџ•ЉпёЏ РљРћРњРђРќР”Рђ: !unban <User_ID> (Р РћР—Р‘РђРќ РљРћР РРЎРўРЈР’РђР§Рђ) ---
+    # --- 🕊️ КОМАНДА: !unban <User_ID> (РОЗБАН КОРИСТУВАЧА) ---
     if message.content.startswith("!unban"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!unban <User_ID>`")
+            return await message.channel.send("⚠️ Usage: `!unban <User_ID>`")
         
         target_id_str = parts[1]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ User ID must be a number.")
+             return await message.channel.send("⚠️ User ID must be a number.")
         
         target_user_id = int(target_id_str)
         main_channel = client.get_channel(CHANNEL_ID)
         if not main_channel:
-            return await message.channel.send("вќЊ **Error:** Cannot find the main server.")
+            return await message.channel.send("❌ **Error:** Cannot find the main server.")
         
         guild = main_channel.guild
         
@@ -3692,28 +3693,28 @@ async def on_message(message):
             user_to_unban = discord.Object(id=target_user_id)
             await guild.unban(user_to_unban, reason="Unbanned via bot.")
             
-            await message.channel.send(f"вњ… **User {target_user_id} has been unbanned in '{guild.name}'.**")
+            await message.channel.send(f"✅ **User {target_user_id} has been unbanned in '{guild.name}'.**")
         except discord.NotFound:
-            await message.channel.send(f"вљ пёЏ **User {target_user_id} is not banned on this server.**")
+            await message.channel.send(f"⚠️ **User {target_user_id} is not banned on this server.**")
         except discord.Forbidden:
-            await message.channel.send("вќЊ **Error:** I don't have the 'Ban Members' permission.")
+            await message.channel.send("❌ **Error:** I don't have the 'Ban Members' permission.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error unbanning user:** {e}")
+            await message.channel.send(f"❌ **Error unbanning user:** {e}")
         return
     # -------------------------------------------------------------
     
-    # --- рџ“‹ РљРћРњРђРќР”Рђ: !banlist (РџРћРљРђР—РђРўР РЎРџРРЎРћРљ Р—РђР‘РђРќР•РќРРҐ) ---
+    # --- 📋 КОМАНДА: !banlist (ПОКАЗАТИ СПИСОК ЗАБАНЕНИХ) ---
     if message.content == "!banlist":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         main_channel = client.get_channel(CHANNEL_ID)
         if not main_channel:
-            return await message.channel.send("вќЊ **Error:** Cannot find the main server.")
+            return await message.channel.send("❌ **Error:** Cannot find the main server.")
         
         guild = main_channel.guild
         
         try:
-            await message.channel.send(f"вЏі **Fetching ban list for server '{guild.name}'...**")
+            await message.channel.send(f"⏳ **Fetching ban list for server '{guild.name}'...**")
             
             ban_list_text = f"=== Ban List for Server: {guild.name} ===\n\n"
             count = 0
@@ -3725,34 +3726,34 @@ async def on_message(message):
                 count += 1
                 
             if count == 0:
-                return await message.channel.send("вњ… **The ban list is empty!** No banned users on this server.")
+                return await message.channel.send("✅ **The ban list is empty!** No banned users on this server.")
                 
             ban_list_text += f"\nTotal banned users: {count}."
             
             file_bin = io.BytesIO(ban_list_text.encode('utf-8'))
             await message.channel.send(
-                content=f"рџ“њ **Done! Found {count} banned users.** Here is the file:", 
+                content=f"📜 **Done! Found {count} banned users.** Here is the file:", 
                 file=discord.File(file_bin, filename="banlist.txt")
             )
             
         except discord.Forbidden:
-            await message.channel.send("вќЊ **Error:** I don't have the 'Ban Members' permission to view the ban list.")
+            await message.channel.send("❌ **Error:** I don't have the 'Ban Members' permission to view the ban list.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error fetching ban list:** {e}")
+            await message.channel.send(f"❌ **Error fetching ban list:** {e}")
         return
     # -------------------------------------------------------------
 
-	# --- рџ“ќ РљРћРњРђРќР”Рђ: !rename <ID> <С‚РµРєСЃС‚> (Р”РћР”РђРўР РўР•РљРЎРў Р’ РљРђР РўРљРЈ Р§Р•Р Р•Р— РџРџ) ---
+	# --- 📝 КОМАНДА: !rename <ID> <текст> (ДОДАТИ ТЕКСТ В КАРТКУ ЧЕРЕЗ ПП) ---
     if message.content.startswith("!rename"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split(maxsplit=2)
         if len(parts) < 3:
-            return await message.channel.send("вљ пёЏ Usage: `!rename <Message_ID> <text>`")
+            return await message.channel.send("⚠️ Usage: `!rename <Message_ID> <text>`")
             
         target_id_str = parts[1]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
              
         new_text = parts[2]
         
@@ -3769,7 +3770,7 @@ async def on_message(message):
                     await found_message.edit(embed=embed)
                     
                     channel_mention = found_message.channel.mention if hasattr(found_message.channel, 'mention') else "Direct Messages"
-                    await message.channel.send(f"вњ… **Success!** Text added to message in {channel_mention}.")
+                    await message.channel.send(f"✅ **Success!** Text added to message in {channel_mention}.")
                     
                     if not isinstance(message.channel, discord.DMChannel):
                         try:
@@ -3778,25 +3779,25 @@ async def on_message(message):
                             pass
                             
                 except Exception as e:
-                    await message.channel.send(f"вќЊ **Error updating message:** {e}")
+                    await message.channel.send(f"❌ **Error updating message:** {e}")
             else:
-                await message.channel.send("вќЊ **Error:** Message must be sent by the bot and contain an embed.")
+                await message.channel.send("❌ **Error:** Message must be sent by the bot and contain an embed.")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-	# --- вњ‰пёЏ РљРћРњРђРќР”Рђ: !pmsg <User_ID> <С‚РµРєСЃС‚> (РќРђРџРРЎРђРўР Р’ РџРџ РљРћР РРЎРўРЈР’РђР§РЈ) ---
+	# --- ✉️ КОМАНДА: !pmsg <User_ID> <текст> (НАПИСАТИ В ПП КОРИСТУВАЧУ) ---
     if message.content.startswith("!pmsg"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split(" ", 2)
         if len(parts) < 2 and not message.attachments:
-            return await message.channel.send("вљ пёЏ **Format:** `!pmsg <User_ID> <text>` (РјРѕР¶РЅР° РїСЂРёРєСЂС–РїР»СЋРІР°С‚Рё РєР°СЂС‚РёРЅРєРё)")
+            return await message.channel.send("⚠️ **Format:** `!pmsg <User_ID> <text>` (можна прикріплювати картинки)")
             
         target_id_str = parts[1]
         if not target_id_str.isdigit():
-             return await message.channel.send("вљ пёЏ **Error:** User ID РјР°С” Р±СѓС‚Рё С‡РёСЃР»РѕРј.")
+             return await message.channel.send("⚠️ **Error:** User ID має бути числом.")
              
         target_user_id = int(target_id_str)
         text_to_send = parts[2] if len(parts) > 2 else ""
@@ -3806,39 +3807,39 @@ async def on_message(message):
             files_to_send.append(await attachment.to_file())
             
         if not text_to_send and not files_to_send:
-            return await message.channel.send("вљ пёЏ **Error:** РќРµРјР°С” С‚РµРєСЃС‚Сѓ Р°Р±Рѕ Р·РѕР±СЂР°Р¶РµРЅРЅСЏ РґР»СЏ РІС–РґРїСЂР°РІРєРё.")
+            return await message.channel.send("⚠️ **Error:** Немає тексту або зображення для відправки.")
             
         try:
-            # РЁСѓРєР°С”РјРѕ РєРѕСЂРёСЃС‚СѓРІР°С‡Р°
+            # Шукаємо користувача
             target_user = await client.fetch_user(target_user_id)
             if not target_user:
-                return await message.channel.send("вќЊ **Error:** РљРѕСЂРёСЃС‚СѓРІР°С‡Р° Р· С‚Р°РєРёРј ID РЅРµ Р·РЅР°Р№РґРµРЅРѕ.")
+                return await message.channel.send("❌ **Error:** Користувача з таким ID не знайдено.")
                 
-            # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ
+            # Відправляємо повідомлення
             await target_user.send(content=text_to_send, files=files_to_send)
-            await message.add_reaction("вњ…")
-            await message.channel.send(f"вњ… **РџРѕРІС–РґРѕРјР»РµРЅРЅСЏ СѓСЃРїС–С€РЅРѕ РґРѕСЃС‚Р°РІР»РµРЅРѕ РІ РџРџ РєРѕСЂРёСЃС‚СѓРІР°С‡Сѓ {target_user.display_name}.**")
+            await message.add_reaction("✅")
+            await message.channel.send(f"✅ **Повідомлення успішно доставлено в ПП користувачу {target_user.display_name}.**")
             
         except discord.Forbidden:
-            await message.channel.send(f"вќЊ **Error:** РќРµРјРѕР¶Р»РёРІРѕ РЅР°РґС–СЃР»Р°С‚Рё РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ {target_user_id}. РњРѕР¶Р»РёРІРѕ, Сѓ РЅСЊРѕРіРѕ Р·Р°РєСЂРёС‚С– РџРџ РґР»СЏ РЅРµ-РґСЂСѓР·С–РІ, Р°Р±Рѕ РІС–РЅ Р·Р°Р±Р»РѕРєСѓРІР°РІ Р±РѕС‚Р°.")
+            await message.channel.send(f"❌ **Error:** Неможливо надіслати повідомлення {target_user_id}. Можливо, у нього закриті ПП для не-друзів, або він заблокував бота.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error:** {e}")
+            await message.channel.send(f"❌ **Error:** {e}")
         return
     # -------------------------------------------------------------------------
 
-   # --- вњ‰пёЏ РљРћРњРђРќР”Рђ: !msg <ID_РєР°РЅР°Р»Сѓ> <С‚РµРєСЃС‚> (+ РњРћР–РќРђ РџР РРљР Р†РџР›РЇРўР РљРђР РўРРќРљР) ---
+   # --- ✉️ КОМАНДА: !msg <ID_каналу> <текст> (+ МОЖНА ПРИКРІПЛЯТИ КАРТИНКИ) ---
     if message.content.startswith("!msg"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split(" ", 2)
         if len(parts) < 2 and not message.attachments:
-            return await message.channel.send("вљ пёЏ **Format:** `!msg <Channel_ID> <text>` (and/or attach an image)")
+            return await message.channel.send("⚠️ **Format:** `!msg <Channel_ID> <text>` (and/or attach an image)")
             
         try:
             channel_id = int(parts[1])
             target_channel = client.get_channel(channel_id) 
             if not target_channel:
-                return await message.channel.send("вќЊ **Error:** Channel with this ID not found.")
+                return await message.channel.send("❌ **Error:** Channel with this ID not found.")
                 
             text_to_send = parts[2] if len(parts) > 2 else ""
             
@@ -3847,29 +3848,29 @@ async def on_message(message):
                 files_to_send.append(await attachment.to_file())
                 
             if not text_to_send and not files_to_send:
-                return await message.channel.send("вљ пёЏ **Error:** No text or image to send.")
+                return await message.channel.send("⚠️ **Error:** No text or image to send.")
                 
             sent_msg = await target_channel.send(content=text_to_send, files=files_to_send)
             
             last_sent_message = sent_msg
             
-            await message.add_reaction("вњ…") 
+            await message.add_reaction("✅") 
             
         except ValueError:
-            await message.channel.send("вќЊ **Error:** Channel ID must be a number.")
+            await message.channel.send("❌ **Error:** Channel ID must be a number.")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error sending message:** {e}")
+            await message.channel.send(f"❌ **Error sending message:** {e}")
         return
     # -------------------------------------------------------------------------
     
-# --- рџ“Ў РљРћРњРђРќР”Рђ: !traffic (РџРћРљРђР—РђРўР РђРљРўРР’РќР† Р Р•Р™РЎР) ---
+# --- 📡 КОМАНДА: !traffic (ПОКАЗАТИ АКТИВНІ РЕЙСИ) ---
     if message.content == "!traffic":
         global LAST_TRAFFIC_TIME
         current_time = time.time()
 
         if current_time - LAST_TRAFFIC_TIME < 10:
             remaining = int(10 - (current_time - LAST_TRAFFIC_TIME))
-            warning_msg = await message.channel.send(f"вЏі **Please wait {remaining} seconds** before requesting traffic again.")
+            warning_msg = await message.channel.send(f"⏳ **Please wait {remaining} seconds** before requesting traffic again.")
             await asyncio.sleep(3)
             try:
                 await warning_msg.delete()
@@ -3879,18 +3880,18 @@ async def on_message(message):
             
         LAST_TRAFFIC_TIME = current_time
         
-        msg = await message.channel.send("рџ”„ **Fetching live traffic data...**")
+        msg = await message.channel.send("🔄 **Fetching live traffic data...**")
         
         async with aiohttp.ClientSession() as session:
             ongoing = await fetch_api(session, "/flights/ongoing")
             
-            # 1. РћР‘Р РћР‘РљРђ РЎРРўРЈРђР¦Р†Р‡, РљРћР›Р РќР•РњРђР„ Р Р•Р™РЎР†Р’
+            # 1. ОБРОБКА СИТУАЦІЇ, КОЛИ НЕМАЄ РЕЙСІВ
             if not ongoing or "results" not in ongoing or len(ongoing["results"]) == 0:
-                embed = discord.Embed(title="рџ“Ў Live Traffic - Ukraine Classic Air Alliance", description="рџґ **No active flights.**", color=0xffff00)
+                embed = discord.Embed(title="📡 Live Traffic - Ukraine Classic Air Alliance", description="😴 **No active flights.**", color=0xffff00)
                 current_utc_time = datetime.now(timezone.utc).strftime('%H:%M')
                 return await msg.edit(content=None, embed=embed)
             
-            # 2. РЇРљР©Рћ Р Р•Р™РЎР Р„, РћР‘Р РћР‘Р›РЇР„РњРћ Р‡РҐ
+            # 2. ЯКЩО РЕЙСИ Є, ОБРОБЛЯЄМО ЇХ
             desc_lines = []
             for raw_f in ongoing["results"]:
                 fid = str(raw_f.get("_id") or raw_f.get("id"))
@@ -3898,7 +3899,7 @@ async def on_message(message):
                 det = await fetch_api(session, f"/flight/{fid}")
                 
                 alt_str, gs_str = "---", "---"
-                phase_str = "вЏі Unknown"
+                phase_str = "⏳ Unknown"
                 
                 if det and "flight" in det:
                     f = det["flight"]
@@ -3907,7 +3908,7 @@ async def on_message(message):
                     loc = last_state.get("location", {})
                     spd = last_state.get("speed", {})
                     
-                    # alt_ft - СЃС‚Р°РЅРґР°СЂС‚РЅР° РІРёСЃРѕС‚Р° (MSL) РґР»СЏ РµС€РµР»РѕРЅСѓ, agl_ft - СЂР°РґС–РѕРІРёСЃРѕС‚РѕРјС–СЂ
+                    # alt_ft - стандартна висота (MSL) для ешелону, agl_ft - радіовисотомір
                     alt_ft = int(loc.get("alt", 0))
                     alt_str = f"{alt_ft:,}".replace(",", ".") + " ft"
                     
@@ -3921,20 +3922,20 @@ async def on_message(message):
                     takeoff_time = f.get("takeoffTimeAct")
                     arr_time = f.get("arrTimeAct") or f.get("landing")
                     
-                    # --- Р›РћР“Р†РљРђ Р¤РђР— РџРћР›Р¬РћРўРЈ ---
+                    # --- ЛОГІКА ФАЗ ПОЛЬОТУ ---
                     if not takeoff_time:
                         if dep_time:
-                            phase_str = "рџљњ Taxiing"
+                            phase_str = "🚜 Taxiing"
                         else:
-                            phase_str = "рџ§і Boarding"
+                            phase_str = "🧳 Boarding"
                     else:
                         if arr_time or (agl_ft < 200 and gs_kts < 50):
                             if agl_ft > 200:
-                                phase_str = "в¤ґпёЏ Go Around"
+                                phase_str = "⤴️ Go Around"
                             else:
-                                phase_str = "рџЏЃ Arrived"
+                                phase_str = "🏁 Arrived"
                         else:
-                            # РђРЅР°Р»С–Р· С–СЃС‚РѕСЂС–С— РґР»СЏ Cruise (РїРµСЂРµРІС–СЂРєР° MSL РІРёСЃРѕС‚Рё 60 СЃРµРє С‚РѕРјСѓ)
+                            # Аналіз історії для Cruise (перевірка MSL висоти 60 сек тому)
                             current_ts = last_state.get("timestamp", time.time() * 1000) / 1000.0
                             found_old = False
                             old_alt = alt_ft
@@ -3955,17 +3956,17 @@ async def on_message(message):
                                 is_cruising = True
                                 
                             if is_cruising:
-                                phase_str = "вњ€пёЏ Cruise"
+                                phase_str = "✈️ Cruise"
                             elif vs_fpm < -250 or (found_old and (old_alt - alt_ft) > 250):
                                 if agl_ft < 10000:
-                                    phase_str = "рџ›¬ Approach"
+                                    phase_str = "🛬 Approach"
                                 else:
-                                    phase_str = "в†пёЏ Descent"
+                                    phase_str = "↘️ Descent"
                             else:
                                 if agl_ft < 10000:
-                                    phase_str = "рџ›« Departed"
+                                    phase_str = "🛫 Departed"
                                 else:
-                                    phase_str = "в†—пёЏ Climb"
+                                    phase_str = "↗️ Climb"
                 else:
                     f = raw_f
 
@@ -3984,30 +3985,30 @@ async def on_message(message):
                 dep = f.get("dep", {}).get("icao", "???") if isinstance(f.get("dep"), dict) else "???"
                 arr = f.get("arr", {}).get("icao", "???") if isinstance(f.get("arr"), dict) else "???"
                 
-                desc_lines.append(f"**{full_cs}** вЂў {pilot} вЂў {ac} вЂў {dep} вћ” {arr}\nв•° в›°пёЏ {alt_str}  |  рџ›°пёЏ {gs_str}  |  {phase_str}")
+                desc_lines.append(f"**{full_cs}** • {pilot} • {ac} • {dep} ➔ {arr}\n╰ ⛰️ {alt_str}  |  🛰️ {gs_str}  |  {phase_str}")
             
-            embed = discord.Embed(title="рџ“Ў Live Traffic - Ukraine Classic Air Alliance", description="\n\n".join(desc_lines), color=0x3498db)
+            embed = discord.Embed(title="📡 Live Traffic - Ukraine Classic Air Alliance", description="\n\n".join(desc_lines), color=0x3498db)
             
             current_utc_time = datetime.now(timezone.utc).strftime('%H:%M')
             total_flights = len(ongoing["results"])
-            embed.set_footer(text=f"вњ€пёЏ Active flights: {total_flights}  |  рџ”„ Updated: {current_utc_time} UTC  |  Newsky API")
+            embed.set_footer(text=f"✈️ Active flights: {total_flights}  |  🔄 Updated: {current_utc_time} UTC  |  Newsky API")
             
             await msg.edit(content=None, embed=embed)
         return
     # -------------------------------------------------------------
 	
-	# --- рџЋ¤ РљРћРњРђРќР”Рђ: !enter <Channel_ID> (Р—Р°Р№С‚Рё РІ РіРѕР»РѕСЃРѕРІРёР№ РєР°РЅР°Р») ---
+	# --- 🎤 КОМАНДА: !enter <Channel_ID> (Зайти в голосовий канал) ---
     if message.content.startswith("!enter"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            return await message.channel.send("вљ пёЏ Usage: `!enter <Voice_Channel_ID>`")
+            return await message.channel.send("⚠️ Usage: `!enter <Voice_Channel_ID>`")
 
         vc_id = int(parts[1])
         target_vc = client.get_channel(vc_id)
 
         if not target_vc or not isinstance(target_vc, discord.VoiceChannel):
-            return await message.channel.send("вќЊ **Error:** Voice channel with this ID not found.")
+            return await message.channel.send("❌ **Error:** Voice channel with this ID not found.")
 
         guild = target_vc.guild
 
@@ -4016,21 +4017,21 @@ async def on_message(message):
 
         try:
             await target_vc.connect()
-            await message.channel.send(f"вњ… **Bot joined channel:** {target_vc.name}")
+            await message.channel.send(f"✅ **Bot joined channel:** {target_vc.name}")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error:** {e}\n*(Make sure `PyNaCl` is in your requirements.txt)*")
+            await message.channel.send(f"❌ **Error:** {e}\n*(Make sure `PyNaCl` is in your requirements.txt)*")
         return
     # -------------------------------------------------------------
 
-    # --- рџ”‡ РљРћРњРђРќР”Рђ: !mute (Р—Р°РјСѓС‚РёС‚Рё/Р РѕР·РјСѓС‚РёС‚Рё Р±РѕС‚Р°) ---
+    # --- 🔇 КОМАНДА: !mute (Замутити/Розмутити бота) ---
     if message.content == "!mute":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
 
         main_channel = client.get_channel(CHANNEL_ID)
         guild = message.guild if message.guild else (main_channel.guild if main_channel else None)
         
         if not guild or not guild.voice_client:
-            return await message.channel.send("вљ пёЏ **Bot is not currently in any voice channel.**")
+            return await message.channel.send("⚠️ **Bot is not currently in any voice channel.**")
 
         bot_voice_state = guild.me.voice
         current_mute = bot_voice_state.self_mute if bot_voice_state else False
@@ -4038,99 +4039,99 @@ async def on_message(message):
 
         try:
             await guild.change_voice_state(channel=guild.voice_client.channel, self_mute=new_mute_state)
-            status_text = "рџ”‡ **Bot microphone MUTED.**" if new_mute_state else "рџ”Љ **Bot microphone UNMUTED.**"
-            await message.channel.send(f"вњ… {status_text}")
+            status_text = "🔇 **Bot microphone MUTED.**" if new_mute_state else "🔊 **Bot microphone UNMUTED.**"
+            await message.channel.send(f"✅ {status_text}")
         except Exception as e:
-            await message.channel.send(f"вќЊ **Error:** {e}")
+            await message.channel.send(f"❌ **Error:** {e}")
         return
     # -------------------------------------------------------------
 
-    # --- рџљЄ РљРћРњРђРќР”Рђ: !leave (Р’РёР№С‚Рё Р· РіРѕР»РѕСЃРѕРІРѕРіРѕ) ---
+    # --- 🚪 КОМАНДА: !leave (Вийти з голосового) ---
     if message.content == "!leave":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
 
         main_channel = client.get_channel(CHANNEL_ID)
         guild = message.guild if message.guild else (main_channel.guild if main_channel else None)
 
         if guild and guild.voice_client:
             await guild.voice_client.disconnect()
-            await message.channel.send("вњ… **Bot left the voice channel.**")
+            await message.channel.send("✅ **Bot left the voice channel.**")
         else:
-            await message.channel.send("вљ пёЏ **Bot is already not in a voice channel.**")
+            await message.channel.send("⚠️ **Bot is already not in a voice channel.**")
         return
     # -------------------------------------------------------------
 
-	# --- рџ“Њ РљРћРњРђРќР”Рђ: !pin <ID> (Р—РђРљР Р†РџРРўР РџРћР’Р†Р”РћРњР›Р•РќРќРЇ) ---
+	# --- 📌 КОМАНДА: !pin <ID> (ЗАКРІПИТИ ПОВІДОМЛЕННЯ) ---
     if message.content.startswith("!pin"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!pin <Message_ID>`")
+            return await message.channel.send("⚠️ Usage: `!pin <Message_ID>`")
             
         target_id = parts[1]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         found_message = await find_discord_message(int(target_id), message)
         
         if found_message:
             try:
                 await found_message.pin()
-                await message.channel.send(f"рџ“Њ **Message successfully pinned in {found_message.channel.mention}!**")
+                await message.channel.send(f"📌 **Message successfully pinned in {found_message.channel.mention}!**")
             except discord.Forbidden:
-                await message.channel.send("вќЊ **Error:** I don't have 'Manage Messages' permission to pin this.")
+                await message.channel.send("❌ **Error:** I don't have 'Manage Messages' permission to pin this.")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error pinning message:** {e}")
+                await message.channel.send(f"❌ **Error pinning message:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-    # --- рџ§І РљРћРњРђРќР”Рђ: !unpin <ID> (Р’Р†Р”РљР Р†РџРРўР РџРћР’Р†Р”РћРњР›Р•РќРќРЇ) ---
+    # --- 🧲 КОМАНДА: !unpin <ID> (ВІДКРІПИТИ ПОВІДОМЛЕННЯ) ---
     if message.content.startswith("!unpin"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
         parts = message.content.split()
         if len(parts) < 2:
-            return await message.channel.send("вљ пёЏ Usage: `!unpin <Message_ID>`")
+            return await message.channel.send("⚠️ Usage: `!unpin <Message_ID>`")
             
         target_id = parts[1]
         if not target_id.isdigit():
-             return await message.channel.send("вљ пёЏ ID must be a number.")
+             return await message.channel.send("⚠️ ID must be a number.")
 
         found_message = await find_discord_message(int(target_id), message)
         
         if found_message:
             try:
                 await found_message.unpin()
-                await message.channel.send(f"рџ§І **Message successfully unpinned in {found_message.channel.mention}!**")
+                await message.channel.send(f"🧲 **Message successfully unpinned in {found_message.channel.mention}!**")
             except discord.Forbidden:
-                await message.channel.send("вќЊ **Error:** I don't have 'Manage Messages' permission to unpin this.")
+                await message.channel.send("❌ **Error:** I don't have 'Manage Messages' permission to unpin this.")
             except Exception as e:
-                await message.channel.send(f"вќЊ **Error unpinning message:** {e}")
+                await message.channel.send(f"❌ **Error unpinning message:** {e}")
         else:
-            await message.channel.send("вќЊ **Message not found.** (Check ID or bot permissions)")
+            await message.channel.send("❌ **Message not found.** (Check ID or bot permissions)")
         return
     # -------------------------------------------------------------
 
-	# --- рџ“ќ РљРћРњРђРќР”Рђ: !editsent (Р—РђРњР†РќРРўР Р¤РђР™Р› РџРђРњ'РЇРўР† - РўР†Р›Р¬РљР Р’ РџРџ) ---
+	# --- 📝 КОМАНДА: !editsent (ЗАМІНИТИ ФАЙЛ ПАМ'ЯТІ - ТІЛЬКИ В ПП) ---
     if message.content.startswith("!editsent"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
-        # рџ”Ґ РџРµСЂРµРІС–СЂРєР° РЅР° С‚Рµ, С‡Рё С†Рµ РџРџ (Direct Messages) рџ”Ґ
+        # 🔥 Перевірка на те, чи це ПП (Direct Messages) 🔥
         if not isinstance(message.channel, discord.DMChannel):
-            return await message.channel.send("вљ пёЏ **This command ONLY works in Direct Messages (DM)!** Please send me a private message.")
+            return await message.channel.send("⚠️ **This command ONLY works in Direct Messages (DM)!** Please send me a private message.")
         
         attachment = None
         
-        # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С„Р°Р№Р» РїСЂРёРєСЂС–РїР»РµРЅРѕ РІС–РґСЂР°Р·Сѓ РґРѕ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ Р· РєРѕРјР°РЅРґРѕСЋ
+        # Перевіряємо, чи файл прикріплено відразу до повідомлення з командою
         if message.attachments:
             attachment = message.attachments[0]
         else:
-            await message.channel.send("рџ“Ґ **Please send the new `sent.json` file here.** You have 60 seconds.")
+            await message.channel.send("📥 **Please send the new `sent.json` file here.** You have 60 seconds.")
             
-            # Р¤С–Р»СЊС‚СЂ: С‡РµРєР°С”РјРѕ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ РІС–Рґ С‚РµР±Рµ, РІ С†СЊРѕРјСѓ Р¶ РєР°РЅР°Р»С– (РџРџ), Р· С„Р°Р№Р»РѕРј
+            # Фільтр: чекаємо повідомлення від тебе, в цьому ж каналі (ПП), з файлом
             def check(m):
                 return m.author == message.author and m.channel == message.channel and m.attachments
                 
@@ -4138,96 +4139,96 @@ async def on_message(message):
                 reply = await client.wait_for('message', check=check, timeout=60.0)
                 attachment = reply.attachments[0]
             except asyncio.TimeoutError:
-                return await message.channel.send("вЏі **Time's up.** Operation cancelled.")
+                return await message.channel.send("⏳ **Time's up.** Operation cancelled.")
                 
-        # РџРµСЂРµРІС–СЂРєР° С„РѕСЂРјР°С‚Сѓ С„Р°Р№Р»Сѓ
+        # Перевірка формату файлу
         if not attachment.filename.endswith('.json'):
-            return await message.channel.send("вќЊ **Error:** The file must be in `.json` format!")
+            return await message.channel.send("❌ **Error:** The file must be in `.json` format!")
             
         try:
-            # Р§РёС‚Р°С”РјРѕ С„Р°Р№Р» С– РїРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С†Рµ РІР°Р»С–РґРЅРёР№ JSON
+            # Читаємо файл і перевіряємо, чи це валідний JSON
             file_bytes = await attachment.read()
             new_data = json.loads(file_bytes.decode('utf-8'))
             
             if not isinstance(new_data, dict):
-                return await message.channel.send("вќЊ **Error:** Invalid file structure (must be a JSON dictionary).")
+                return await message.channel.send("❌ **Error:** Invalid file structure (must be a JSON dictionary).")
                 
-            # Р—Р°РїРёСЃСѓС”РјРѕ РЅРѕРІС– РґР°РЅС– Сѓ С„Р°Р№Р»
+            # Записуємо нові дані у файл
             STATE_FILE.write_text(json.dumps(new_data, indent=4), encoding="utf-8")
             
-            await message.channel.send("вњ… **File `sent.json` successfully replaced!**\nрџ”„ Performing automatic reboot to apply new data...")
+            await message.channel.send("✅ **File `sent.json` successfully replaced!**\n🔄 Performing automatic reboot to apply new data...")
             
-            # Р’Р±РёРІР°С”РјРѕ РїСЂРѕС†РµСЃ. Railway Р°РІС‚РѕРјР°С‚РёС‡РЅРѕ РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚СЊ Р±РѕС‚Р° Р·Р° СЃРµРєСѓРЅРґСѓ!
+            # Вбиваємо процес. Railway автоматично перезапустить бота за секунду!
             await asyncio.sleep(1)
             os._exit(1)
             
         except json.JSONDecodeError as e:
-            await message.channel.send(f"вќЊ **Error:** File is corrupted or invalid JSON!\n`{e}`")
+            await message.channel.send(f"❌ **Error:** File is corrupted or invalid JSON!\n`{e}`")
         except Exception as e:
-            await message.channel.send(f"вќЊ **An error occurred:** {e}")
+            await message.channel.send(f"❌ **An error occurred:** {e}")
             
         return
     # -------------------------------------------------------------
 
-# --- рџ“љ РљРћРњРђРќР”Рђ: !help (Р”РРќРђРњР†Р§РќРђ Р”Р›РЇ РљРћР РРЎРўРЈР’РђР§Р†Р’, РђР”РњР†РќР†Р’ РўРђ Р’Р›РђРЎРќРРљРђ) ---
+# --- 📚 КОМАНДА: !help (ДИНАМІЧНА ДЛЯ КОРИСТУВАЧІВ, АДМІНІВ ТА ВЛАСНИКА) ---
     if message.content == "!help":
         is_owner = message.author.id in ADMIN_IDS
         
-        embed = discord.Embed(title="рџ“љ Bot Commands", color=0x3498db)
+        embed = discord.Embed(title="📚 Bot Commands", color=0x3498db)
         
-        # 1. Р¦Рµ Р±Р°С‡Р°С‚СЊ РЈРЎР† РєРѕСЂРёСЃС‚СѓРІР°С‡С–
-        desc = "**рџ”№ User Commands:**\n"
-        desc += "**`!help`** вЂ” Show command list\n"
-        desc += "**`!traffic`** вЂ” Show active flights\n\n"
+        # 1. Це бачать УСІ користувачі
+        desc = "**🔹 User Commands:**\n"
+        desc += "**`!help`** — Show command list\n"
+        desc += "**`!traffic`** — Show active flights\n\n"
         
-        # 2. Р¦Рµ Р±Р°С‡Р°С‚СЊ РђР”РњР†РќР†РЎРўР РђРўРћР Р СЃРµСЂРІРµСЂР° (С– С‚Рё С‚Р°РєРѕР¶)
+        # 2. Це бачать АДМІНІСТРАТОРИ сервера (і ти також)
         if is_admin:
-            desc += "**рџ”’ Admin Commands:**\n"
-            desc += "**`!status`** вЂ” System status\n"
-            desc += "**`!test [min]`** вЂ” Run test scenarios\n"
-            desc += "**`!syncweek`** вЂ” Sync flights for current week\n"
-            desc += "**`!updatedemand`** вЂ” Force GitHub demand update\n"
-            desc += "**`!delflight <ID>`** вЂ” Remove specific flight from stats\n"
-            desc += "**`!ban <ID> [reason]`** вЂ” Ban user on server\n"
-            desc += "**`!unban <ID>`** вЂ” Unban user on server\n"
-            desc += "**`!audit [all/num]`** вЂ” Download server audit log\n"
-            desc += "**`!cache`** вЂ” Download bot memory (sent.json)\n"
-            desc += "**`!spy <ID>`** вЂ” Dump raw flight JSON data\n"
-            desc += "**`!stats`** вЂ” Download weekly_stats.json\n"
-            desc += "**`!banlist`** вЂ” Download banned users list\n"
-            desc += "**`!disk`** вЂ” Show server disk/memory usage\n\n"
+            desc += "**🔒 Admin Commands:**\n"
+            desc += "**`!status`** — System status\n"
+            desc += "**`!test [min]`** — Run test scenarios\n"
+            desc += "**`!syncweek`** — Sync flights for current week\n"
+            desc += "**`!updatedemand`** — Force GitHub demand update\n"
+            desc += "**`!delflight <ID>`** — Remove specific flight from stats\n"
+            desc += "**`!ban <ID> [reason]`** — Ban user on server\n"
+            desc += "**`!unban <ID>`** — Unban user on server\n"
+            desc += "**`!audit [all/num]`** — Download server audit log\n"
+            desc += "**`!cache`** — Download bot memory (sent.json)\n"
+            desc += "**`!spy <ID>`** — Dump raw flight JSON data\n"
+            desc += "**`!stats`** — Download weekly_stats.json\n"
+            desc += "**`!banlist`** — Download banned users list\n"
+            desc += "**`!disk`** — Show server disk/memory usage\n\n"
             
-            desc += "**рџ’¬ Message & UI Management:**\n"
-            desc += "**`!msg [ID] <text/pic>`** вЂ” Send text or image message\n"
-            desc += "**`!reply <ID> <text>`** вЂ” Reply to a message\n"
-            desc += "**`!rename <ID> <text>`** вЂ” Append text to an existing embed\n"
-            desc += "**`!del <msg_ID>`** вЂ” Delete any message globally\n"
-            desc += "**`!pin <ID>`** вЂ” Pin a message\n"
-            desc += "**`!unpin <ID>`** вЂ” Unpin a message\n"
-            desc += "**`!wow <ID> <emoji>`** вЂ” Add reaction to a message\n"
-            desc += "**`!unwow <ID> <emoji>`** вЂ” Remove reaction\n"
-            desc += "**`!teststatspin`** вЂ” Generate weekly report (PINS message)\n"
-            desc += "**`!teststats`** вЂ” Generate weekly report (NO pin)\n"
-            desc += "**`!teststatstest`** вЂ” Generate presentation report (Fake Data)\n"
-            desc += "**`!addflight <ID>`** вЂ” Force add missed flight to stats\n"
-            desc += "**`!clearstats`** вЂ” Wipe all weekly stats data\n"
-            desc += "**`!idemoji <name>`** вЂ” Get code for a custom server emoji\n\n"
+            desc += "**💬 Message & UI Management:**\n"
+            desc += "**`!msg [ID] <text/pic>`** — Send text or image message\n"
+            desc += "**`!reply <ID> <text>`** — Reply to a message\n"
+            desc += "**`!rename <ID> <text>`** — Append text to an existing embed\n"
+            desc += "**`!del <msg_ID>`** — Delete any message globally\n"
+            desc += "**`!pin <ID>`** — Pin a message\n"
+            desc += "**`!unpin <ID>`** — Unpin a message\n"
+            desc += "**`!wow <ID> <emoji>`** — Add reaction to a message\n"
+            desc += "**`!unwow <ID> <emoji>`** — Remove reaction\n"
+            desc += "**`!teststatspin`** — Generate weekly report (PINS message)\n"
+            desc += "**`!teststats`** — Generate weekly report (NO pin)\n"
+            desc += "**`!teststatstest`** — Generate presentation report (Fake Data)\n"
+            desc += "**`!addflight <ID>`** — Force add missed flight to stats\n"
+            desc += "**`!clearstats`** — Wipe all weekly stats data\n"
+            desc += "**`!idemoji <name>`** — Get code for a custom server emoji\n\n"
             
-            desc += "**рџЋ­ Status Management:**\n"
-            desc += "**`!next`** вЂ” Force next bot status\n"
-            desc += "**`!addstatus <type> <text>`** вЂ” Save & Add status\n"
-            desc += "**`!delstatus [num]`** вЂ” Delete status\n\n"
+            desc += "**🎭 Status Management:**\n"
+            desc += "**`!next`** — Force next bot status\n"
+            desc += "**`!addstatus <type> <text>`** — Save & Add status\n"
+            desc += "**`!delstatus [num]`** — Delete status\n\n"
             
-        # 3. Р¦Рµ Р±Р°С‡РёС€ РўР†Р›Р¬РљР РўР (ID Р· ADMIN_IDS)
+        # 3. Це бачиш ТІЛЬКИ ТИ (ID з ADMIN_IDS)
         if is_owner:
-            desc += "**рџ‘‘ Owner Commands (Super Secret):**\n"
-            desc += "**`!clearwow <ID>`** вЂ” Clear ALL reactions from a msg\n"
-            desc += "**`!banwow <ID>`** вЂ” Protect msg from new reactions\n"
-            desc += "**`!unbanwow <ID>`** вЂ” Remove reaction protection\n"
-            desc += "**`!enter <ID>`** вЂ” Enter voice channel\n"
-            desc += "**`!leave`** вЂ” Leave voice channel\n"
-            desc += "**`!mute`** вЂ” Toggle bot microphone mute\n"
-            desc += "**`!files`** вЂ” List files in local storage (/app/data)\n\n"
+            desc += "**👑 Owner Commands (Super Secret):**\n"
+            desc += "**`!clearwow <ID>`** — Clear ALL reactions from a msg\n"
+            desc += "**`!banwow <ID>`** — Protect msg from new reactions\n"
+            desc += "**`!unbanwow <ID>`** — Remove reaction protection\n"
+            desc += "**`!enter <ID>`** — Enter voice channel\n"
+            desc += "**`!leave`** — Leave voice channel\n"
+            desc += "**`!mute`** — Toggle bot microphone mute\n"
+            desc += "**`!files`** — List files in local storage (/app/data)\n\n"
             
         embed.description = desc
         await message.channel.send(embed=embed)
@@ -4235,97 +4236,97 @@ async def on_message(message):
     # ----------------------------------------------------------------
     
     if message.content == "!next":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         await change_status()
-        await message.channel.send("вњ… **Status switched!**")
+        await message.channel.send("✅ **Status switched!**")
         return
 
     if message.content.startswith("!addstatus"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split(maxsplit=2)
-        if len(parts) < 3: return await message.channel.send("вљ пёЏ Usage: `!addstatus <watch/play> <text>`")
+        if len(parts) < 3: return await message.channel.send("⚠️ Usage: `!addstatus <watch/play> <text>`")
         sType = parts[1].lower()
-        if sType not in ["watch", "play", "listen"]: return await message.channel.send("вљ пёЏ Use: `watch`, `play`, `listen`")
+        if sType not in ["watch", "play", "listen"]: return await message.channel.send("⚠️ Use: `watch`, `play`, `listen`")
         status_list.append({"type": sType, "name": parts[2]})
         save_statuses()
         global status_cycle
         status_cycle = cycle(status_list)
-        await message.channel.send(f"вњ… Saved & Added: **{parts[2]}**")
+        await message.channel.send(f"✅ Saved & Added: **{parts[2]}**")
         return
 
     if message.content.startswith("!delstatus"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) == 1:
             list_str = "\n".join([f"`{i+1}.` {s['type'].upper()}: {s['name']}" for i, s in enumerate(status_list)])
-            embed = discord.Embed(title="рџ—‘пёЏ Delete Status", description=f"Type `!delstatus <number>` to delete.\n\n{list_str}", color=0xe74c3c)
+            embed = discord.Embed(title="🗑️ Delete Status", description=f"Type `!delstatus <number>` to delete.\n\n{list_str}", color=0xe74c3c)
             return await message.channel.send(embed=embed)
         try:
             idx = int(parts[1]) - 1
             if 0 <= idx < len(status_list):
-                if len(status_list) <= 1: return await message.channel.send("вљ пёЏ Cannot delete the last status!")
+                if len(status_list) <= 1: return await message.channel.send("⚠️ Cannot delete the last status!")
                 removed = status_list.pop(idx)
                 save_statuses()
                 status_cycle = cycle(status_list) 
-                await message.channel.send(f"рџ—‘пёЏ Deleted & Saved: **{removed['name']}**")
+                await message.channel.send(f"🗑️ Deleted & Saved: **{removed['name']}**")
             else:
-                await message.channel.send("вљ пёЏ Invalid number.")
+                await message.channel.send("⚠️ Invalid number.")
         except ValueError:
-            await message.channel.send("вљ пёЏ Please enter a number.")
+            await message.channel.send("⚠️ Please enter a number.")
         return
 
     if message.content == "!status":
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
-        msg = await message.channel.send("рџ”„ **Checking Systems...**")
-        api_status = "вќЊ API Error"
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
+        msg = await message.channel.send("🔄 **Checking Systems...**")
+        api_status = "❌ API Error"
         flights_count = 0 
         
         async with aiohttp.ClientSession() as session:
             test = await fetch_api(session, "/flights/ongoing")
             if test is not None: 
-                api_status = "вњ… Connected to Newsky"
+                api_status = "✅ Connected to Newsky"
                 if "results" in test:
                     flights_count = len(test["results"])
         
         launch_str = START_TIME.strftime("%d-%m-%Y %H:%M:%S UTC")
 
-        embed = discord.Embed(title="рџ¤– Bot System Status", color=0x2ecc71)
-        embed.add_field(name="рџ“Ў Newsky API", value=api_status, inline=False)
-        embed.add_field(name="вњ€пёЏ Active Flights", value=f"**{flights_count}** tracking", inline=False)
-        embed.add_field(name="рџЊЌ Airports DB", value=f"вњ… Loaded ({len(AIRPORTS_DB)} airports)", inline=False)
-        embed.add_field(name="рџ“¶ Discord Ping", value=f"**{round(client.latency * 1000)}ms**", inline=False)
-        embed.add_field(name="рџљЂ Launched at", value=f"`{launch_str}`", inline=False)
+        embed = discord.Embed(title="🤖 Bot System Status", color=0x2ecc71)
+        embed.add_field(name="📡 Newsky API", value=api_status, inline=False)
+        embed.add_field(name="✈️ Active Flights", value=f"**{flights_count}** tracking", inline=False)
+        embed.add_field(name="🌍 Airports DB", value=f"✅ Loaded ({len(AIRPORTS_DB)} airports)", inline=False)
+        embed.add_field(name="📶 Discord Ping", value=f"**{round(client.latency * 1000)}ms**", inline=False)
+        embed.add_field(name="🚀 Launched at", value=f"`{launch_str}`", inline=False)
         await msg.edit(content=None, embed=embed)
         return
 
     if message.content.startswith("!spy"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         try:
             parts = message.content.split()
-            if len(parts) < 2: return await message.channel.send("вљ пёЏ Usage: `!spy <ID>`")
+            if len(parts) < 2: return await message.channel.send("⚠️ Usage: `!spy <ID>`")
             fid = parts[1]
-            await message.channel.send(f"рџ•µпёЏ **Analyzing {fid}...**")
+            await message.channel.send(f"🕵️ **Analyzing {fid}...**")
             async with aiohttp.ClientSession() as session:
                 data = await fetch_api(session, f"/flight/{fid}")
-                if not data: return await message.channel.send("вќЊ API Error")
+                if not data: return await message.channel.send("❌ API Error")
                 file_bin = io.BytesIO(json.dumps(data, indent=4).encode())
-                await message.channel.send(content=f"рџ“‚ **Dump {fid}:**", file=discord.File(file_bin, filename=f"flight_{fid}.json"))
+                await message.channel.send(content=f"📂 **Dump {fid}:**", file=discord.File(file_bin, filename=f"flight_{fid}.json"))
         except Exception as e: await message.channel.send(f"Error: {e}")
         return
 
     if message.content.startswith("!test"):
-        if not is_admin: return await message.channel.send("рџљ« **Access Denied**")
+        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         parts = message.content.split()
         if len(parts) == 2:
             try:
                 custom_delay = int(parts[1])
-                await message.channel.send(f"рџ› пёЏ **Custom Test (Delay: {custom_delay} min)...**")
+                await message.channel.send(f"🛠️ **Custom Test (Delay: {custom_delay} min)...**")
                 mock_custom = {"_id": "test_custom", "flightNumber": "TEST1", "airline": {"icao": "OSA"}, "dep": {"icao": "UKBB", "name": "Boryspil"}, "arr": {"icao": "LPMA", "name": "Madeira"}, "aircraft": {"airframe": {"name": "B738"}}, "pilot": {"fullname": "Capt. Test"}, "payload": {"pax": 140, "cargo": 35}, "network": "VATSIM", "rating": 9.9, "landing": {"rate": -120, "gForce": 1.05}, "delay": custom_delay, "result": {"totals": {"distance": 350, "time": 55, "balance": 12500, "payload": {"pax": 140, "cargo": 35}}}}
                 await send_flight_message(message.channel, "Completed", mock_custom, "test")
                 return
             except ValueError: pass
 
-        await message.channel.send("рџ› пёЏ **Running Full Test Suite...**")
+        await message.channel.send("🛠️ **Running Full Test Suite...**")
         mock_dep = {"_id": "test_dep", "flightNumber": "TEST1", "airline": {"icao": "OSA"}, "dep": {"icao": "UKBB", "name": "Boryspil"}, "arr": {"icao": "LPMA", "name": "Madeira"}, "aircraft": {"airframe": {"name": "B738"}}, "pilot": {"fullname": "Capt. Test"}, "payload": {"pax": 145, "cargo": 35}, "delay": 2}
         await send_flight_message(message.channel, "Departed", mock_dep, "test")
         mock_norm = {"_id": "test_norm", "schedule": True, "flightNumber": "TEST1", "airline": {"icao": "OSA"}, "dep": {"icao": "UKBB", "name": "Boryspil"}, "arr": {"icao": "LPMA", "name": "Madeira"}, "aircraft": {"airframe": {"name": "B738"}}, "pilot": {"fullname": "Capt. Test"}, "payload": {"pax": 100, "cargo": 40}, "network": "VATSIM", "rating": 9.9, "landing": {"rate": -150, "gForce": 1.1}, "delay": -10, "result": {"totals": {"distance": 350, "time": 55, "balance": 12500, "payload": {"pax": 100, "cargo": 40}}}}
@@ -4340,10 +4341,10 @@ async def main_loop():
     await client.wait_until_ready()
     await update_airports_db()
     
-    # рџ”Ґ Р—РђРџРЈРЎРљРђР„РњРћ Р РђР”РђР  РўРЈРў (РїС–СЃР»СЏ С‚РѕРіРѕ, СЏРє Р±Р°Р·Р° 100% Р·Р°РІР°РЅС‚Р°Р¶РµРЅР°) рџ”Ґ
+    # 🔥 ЗАПУСКАЄМО РАДАР ТУТ (після того, як база 100% завантажена) 🔥
     if not check_charters_task.is_running():
         check_charters_task.start()
-        print("рџљЃ Charter radar started!")
+        print("🚁 Charter radar started!")
     
     channel = client.get_channel(CHANNEL_ID)
     state = load_state()
@@ -4360,14 +4361,14 @@ async def main_loop():
                 ongoing = await fetch_api(session, "/flights/ongoing")
                 if ongoing and "results" in ongoing:
                     ongoing_ids = set()
-                    print(f"рџ“Ў Tracking {len(ongoing['results'])} flights...", end='\r')
+                    print(f"📡 Tracking {len(ongoing['results'])} flights...", end='\r')
                     for raw_f in ongoing["results"]:
                         fid = str(raw_f.get("_id") or raw_f.get("id"))
                         ongoing_ids.add(fid)
                         
                         state.setdefault(fid, {})
                         
-                        # --- 1. Р›Р†РќРР’Рђ РџР•Р Р•Р’Р†Р РљРђ ---
+                        # --- 1. ЛІНИВА ПЕРЕВІРКА ---
                         if state[fid].get("takeoff"):
                             continue
                             
@@ -4381,7 +4382,7 @@ async def main_loop():
                             msg_id = await send_flight_message(channel, "Departed", f, "ongoing")
                             state[fid]["takeoff"] = True
                             
-                            # рџ”Ґ РќРћР’Р•: Р“РµРЅРµСЂР°С†С–СЏ РјС–С‚РєРё С‚РёР¶РЅСЏ РїС–Рґ С‡Р°СЃ Р·Р»СЊРѕС‚Сѓ рџ”Ґ
+                            # 🔥 НОВЕ: Генерація мітки тижня під час зльоту 🔥
                             sched_time = f.get("depTimeSched") or f.get("creationDate")
                             state[fid]["week"] = get_iso_week(sched_time)
                             
@@ -4397,59 +4398,59 @@ async def main_loop():
                             continue
                         if fid in state and state[fid].get("completed"): continue
                         
-                        # --- Р›РћР“Р†РљРђ Р”Р›РЇ Р—РђРљР РРўРРҐ РўРђ Р’РР”РђР›Р•РќРРҐ Р Р•Р™РЎР†Р’ ---
+                        # --- ЛОГІКА ДЛЯ ЗАКРИТИХ ТА ВИДАЛЕНИХ РЕЙСІВ ---
                         if raw_f.get("close"):
                             det = await fetch_api(session, f"/flight/{fid}")
                             
-                            # РЈРЅС–РІРµСЂСЃР°Р»СЊРЅРёР№ Р°РЅР°Р»С–Р·Р°С‚РѕСЂ Р·Р°РїРѕР±С–Р¶РЅРёРєС–РІ
+                            # Універсальний аналізатор запобіжників
                             def check_safeguards(api_data):
                                 if not api_data or "flight" not in api_data:
-                                    return "API РїРѕРІРµСЂРЅСѓР»Рѕ РїРѕСЂРѕР¶РЅСЋ РІС–РґРїРѕРІС–РґСЊ (РЅРµРјР°С” РґР°РЅРёС… РїСЂРѕ СЂРµР№СЃ)"
+                                    return "API повернуло порожню відповідь (немає даних про рейс)"
                                 fl = api_data["flight"]
                                 totals = fl.get("result", {}).get("totals", {})
                                 d = totals.get("distance", 0)
                                 t_time = totals.get("time", 0)
                                 if d == 0 and t_time == 0:
-                                    return f"РќСѓР»СЊРѕРІС– РїРѕРєР°Р·РЅРёРєРё (Р”РёСЃС‚Р°РЅС†С–СЏ: {d} nm, Р§Р°СЃ: {t_time} min)"
+                                    return f"Нульові показники (Дистанція: {d} nm, Час: {t_time} min)"
                                 callsign = fl.get("flightNumber") or fl.get("callsign")
                                 if not callsign or callsign == "N/A":
-                                    return "Р’С–РґСЃСѓС‚РЅС–Р№ РїРѕР·РёРІРЅРёР№ (Callsign = N/A)"
-                                return None # РЇРєС‰Рѕ None - СЂРµР№СЃ С–РґРµР°Р»СЊРЅРёР№
+                                    return "Відсутній позивний (Callsign = N/A)"
+                                return None # Якщо None - рейс ідеальний
                                 
                             reason = check_safeguards(det)
                             
                             if reason:
-                                for attempt in range(1, 4): # Р РѕР±РёРјРѕ СЂС–РІРЅРѕ 3 СЃРїСЂРѕР±Рё
-                                    print(f"вљ пёЏ Р РµР№СЃ {fid} СЃРїС–Р№РјР°РІ Р·Р°РїРѕР±С–Р¶РЅРёРє ({reason}). РЎРїСЂРѕР±Р° {attempt}/3. Р§РµРєР°СЋ 3 СЃРµРєСѓРЅРґРё...")
-                                    await asyncio.sleep(3) # Р§РµРєР°С”РјРѕ РЎРђРњР• 3 СЃРµРєСѓРЅРґРё
+                                for attempt in range(1, 4): # Робимо рівно 3 спроби
+                                    print(f"⚠️ Рейс {fid} спіймав запобіжник ({reason}). Спроба {attempt}/3. Чекаю 3 секунди...")
+                                    await asyncio.sleep(3) # Чекаємо САМЕ 3 секунди
                                     
-                                    # Р РѕР±РёРјРѕ РўРћР™ РЎРђРњРР™ Р—РђРџРРў С‰Рµ СЂР°Р·
+                                    # Робимо ТОЙ САМИЙ ЗАПИТ ще раз
                                     det = await fetch_api(session, f"/flight/{fid}")
                                     reason = check_safeguards(det)
                                     
                                     if not reason:
-                                        break # Р”Р°РЅС– РѕРЅРѕРІРёР»РёСЃСЏ, Р·Р°РїРѕР±С–Р¶РЅРёРє Р·РЅСЏС‚Рѕ! Р’РёС…РѕРґРёРјРѕ Р· С†РёРєР»Сѓ РѕС‡С–РєСѓРІР°РЅРЅСЏ
+                                        break # Дані оновилися, запобіжник знято! Виходимо з циклу очікування
                                         
-                                if reason: # РЇРєС‰Рѕ РїС–СЃР»СЏ РІСЃС–С… 3 СЃРїСЂРѕР± РІСЃРµ С‰Рµ С” Р±Р°Рі
-                                    print(f"рџ™€ РџСЂРѕС–РіРЅРѕСЂРѕРІР°РЅРѕ СЂРµР№СЃ {fid} | {reason}")
+                                if reason: # Якщо після всіх 3 спроб все ще є баг
+                                    print(f"🙈 Проігноровано рейс {fid} | {reason}")
                                     state.setdefault(fid, {})["completed"] = True
                                     
-                                    # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ Р·РІС–С‚ С‚РѕР±С– РІ РџРџ Р· РїСЂРёС‡РёРЅРѕСЋ
+                                    # Відправляємо звіт тобі в ПП з причиною
                                     try:
                                         owner = await client.fetch_user(ADMIN_IDS[0])
                                         await owner.send(
-                                            f"рџ™€ **РџСЂРѕС–РіРЅРѕСЂРѕРІР°РЅРѕ Р±Р°РіРѕРІР°РЅРёР№ СЂРµР№СЃ!**\n"
-                                            f"рџ”— **ID:** `{fid}`\n"
-                                            f"рџЊђ [Р’С–РґРєСЂРёС‚Рё СЂРµР№СЃ РЅР° Newsky](https://newsky.app/flight/{fid})\n"
-                                            f"рџ›‘ **РџСЂРёС‡РёРЅР° С–РіРЅРѕСЂСѓ:** {reason}\n"
-                                            f"*(Р”Р°РЅС– РЅРµ РѕРЅРѕРІРёР»РёСЃСЏ РЅР°РІС–С‚СЊ РїС–СЃР»СЏ С‚СЂСЊРѕС… СЃРїСЂРѕР± РїРѕ 3 СЃРµРєСѓРЅРґРё)*"
+                                            f"🙈 **Проігноровано багований рейс!**\n"
+                                            f"🔗 **ID:** `{fid}`\n"
+                                            f"🌐 [Відкрити рейс на Newsky](https://newsky.app/flight/{fid})\n"
+                                            f"🛑 **Причина ігнору:** {reason}\n"
+                                            f"*(Дані не оновилися навіть після трьох спроб по 3 секунди)*"
                                         )
                                     except Exception as e:
-                                        print(f"РџРѕРјРёР»РєР° РІС–РґРїСЂР°РІРєРё РІ РџРџ: {e}")
+                                        print(f"Помилка відправки в ПП: {e}")
                                         
-                                    continue # РЎРєРёРґР°С”РјРѕ СЂРµР№СЃ С– Р№РґРµРјРѕ РґР°Р»С–
+                                    continue # Скидаємо рейс і йдемо далі
 
-                            # РЇРєС‰Рѕ РїСЂРѕР№С€Р»Рё Р·Р°РїРѕР±С–Р¶РЅРёРєРё (РѕРґСЂР°Р·Сѓ Р°Р±Рѕ РїС–СЃР»СЏ РІРґР°Р»РёС… СЃРїСЂРѕР±)
+                            # Якщо пройшли запобіжники (одразу або після вдалих спроб)
                             f = det["flight"]
                             cs = f.get("flightNumber") or f.get("callsign") or "N/A"
                             if cs == "N/A": continue
@@ -4457,14 +4458,14 @@ async def main_loop():
                             reply_id = state.get(fid, {}).get("msg_id")
                             await send_flight_message(channel, "Completed", f, "result", reply_to_id=reply_id)
                             
-                            # рџ”Ґ РќРћР’Р•: Р—Р±С–СЂ СЃС‚Р°С‚РёСЃС‚РёРєРё РїС–СЃР»СЏ РїРѕСЃР°РґРєРё рџ”Ґ
+                            # 🔥 НОВЕ: Збір статистики після посадки 🔥
                             week_tag = state.get(fid, {}).get("week") or get_iso_week()
                             update_weekly_stats(f, week_tag)
                             
                             # ==========================================
-                            # рџљЂ РњРђР“Р†РЇ GITHUB (Р—РђРџРРЎ Р Р•Р™РЎРЈ РќРђ РЎРђР™Рў)
+                            # 🚀 МАГІЯ GITHUB (ЗАПИС РЕЙСУ НА САЙТ)
                             # ==========================================
-                            # Р’РёР·РЅР°С‡Р°С”РјРѕ С‚РёР¶РґРµРЅСЊ Р·Р° С‡Р°СЃРѕРј РїРѕСЃР°РґРєРё (arrTimeAct), СЏРє С‚Рё С– РїСЂРѕСЃРёРІ!
+                            # Визначаємо тиждень за часом посадки (arrTimeAct), як ти і просив!
                             arrival_time = f.get("arrTimeAct") or f.get("close")
                             target_week = get_iso_week(arrival_time)
                             
@@ -4475,15 +4476,15 @@ async def main_loop():
                             pilot_name = pilot_data.get("fullname", "Unknown Pilot")
                             pilot_avatar = pilot_data.get("avatar", "default")
                             
-                            # Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РЅР° GitHub СЏРє РѕРєСЂРµРјРµ С„РѕРЅРѕРІРµ Р·Р°РІРґР°РЅРЅСЏ, 
-                            # С‰РѕР± Р±РѕС‚ РЅРµ Р·Р°РІРёСЃР°РІ С– РјРёС‚С‚С”РІРѕ РІС–РґРїСЂР°РІР»СЏРІ РїРѕРІС–РґРѕРјР»РµРЅРЅСЏ РІ Discord
+                            # Відправляємо на GitHub як окреме фонове завдання, 
+                            # щоб бот не зависав і миттєво відправляв повідомлення в Discord
                             client.loop.create_task(
                                 save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
                             )
                             # ==========================================
                             
                             state.setdefault(fid, {})["completed"] = True
-                            print(f"вњ… Report Sent: {cs}")
+                            print(f"✅ Report Sent: {cs}")
                         
                         elif raw_f.get("deleted"):
                             
@@ -4496,15 +4497,15 @@ async def main_loop():
                             reply_id = state.get(fid, {}).get("msg_id")
                             await send_flight_message(channel, "Cancelled", f, "ongoing", reply_to_id=reply_id)
                             state.setdefault(fid, {})["completed"] = True
-                            print(f"вљ« Cancel Report Sent: {cs}")
+                            print(f"⚫ Cancel Report Sent: {cs}")
 
                 if first_run:
-                    print("рџ”• First run sync complete. No spam.")
+                    print("🔕 First run sync complete. No spam.")
                     first_run = False
 
                 save_state(state)
                 
-                # рџ”Ґ РћРќРћР’Р›Р•РќРР™ Р’РРљР›РРљ: РџРµСЂРµРґР°С”РјРѕ СЃРїРёСЃРѕРє Р¶РёРІРёС… СЂРµР№СЃС–РІ (ongoing_ids)
+                # 🔥 ОНОВЛЕНИЙ ВИКЛИК: Передаємо список живих рейсів (ongoing_ids)
                 if ongoing_ids is not None:
                     await check_and_publish_weekly_stats(channel, state, ongoing_ids)
                 
@@ -4513,7 +4514,7 @@ async def main_loop():
             
             await asyncio.sleep(CHECK_INTERVAL)
 
-# --- вљЎ Р РђР”РђР  Р Р•РђРљР¦Р†Р™ (РњРРўРўР„Р’Р• Р’РР”РђР›Р•РќРќРЇ) ---
+# --- ⚡ РАДАР РЕАКЦІЙ (МИТТЄВЕ ВИДАЛЕННЯ) ---
 @client.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == client.user.id:
@@ -4532,56 +4533,56 @@ async def on_raw_reaction_add(payload):
 
             await message.remove_reaction(payload.emoji, user)
         except discord.Forbidden:
-            print("вљ пёЏ Error: Bot lacks 'Manage Messages' permission on the server!")
+            print("⚠️ Error: Bot lacks 'Manage Messages' permission on the server!")
         except Exception as e:
             print(f"Error removing reaction: {e}")
 
 # ====================================================================
-# рџЊђ WEBHOOK РЎР•Р Р’Р•Р  Р”Р›РЇ NEWSKY (РџР РР™РћРњ Р—РђРЇР’РћРљ)
+# 🌐 WEBHOOK СЕРВЕР ДЛЯ NEWSKY (ПРИЙОМ ЗАЯВОК)
 # ====================================================================
 async def newsky_webhook(request):
     try:
         data = await request.json()
-        print(f"рџ“Ґ [WEBHOOK DATA]: {data}") # Р›РѕРі РґР»СЏ РїРµСЂРµРІС–СЂРєРё РєР»СЋС‡С–РІ!
+        print(f"📥 [WEBHOOK DATA]: {data}") # Лог для перевірки ключів!
 
-        channel = client.get_channel(CHANNEL_ID) # РўСѓС‚ РјР°С” Р±СѓС‚Рё ID С‚РІРѕРіРѕ РєР°РЅР°Р»Сѓ
+        channel = client.get_channel(CHANNEL_ID) # Тут має бути ID твого каналу
         if not channel:
             return web.Response(text="Channel not found", status=500)
 
-        # 1. РЇРєС‰Рѕ Newsky РЅР°РґСЃРёР»Р°С” РІР¶Рµ РіРѕС‚РѕРІРёР№ РґРёР·Р°Р№РЅ Discord
+        # 1. Якщо Newsky надсилає вже готовий дизайн Discord
         if "embeds" in data and len(data["embeds"]) > 0:
             embed = discord.Embed.from_dict(data["embeds"][0])
             await channel.send(embed=embed)
             return web.Response(text="OK", status=200)
 
-        # 2. РЇРєС‰Рѕ РїРѕС‚СЂС–Р±РЅРѕ Р·С–Р±СЂР°С‚Рё РґРёР·Р°Р№РЅ СЃР°РјРѕСЃС‚С–Р№РЅРѕ
+        # 2. Якщо потрібно зібрати дизайн самостійно
         pilot_data = data.get("pilot", {})
         pilot_name = pilot_data.get("fullname") or pilot_data.get("username") or "Unknown Pilot"
         
         embed = discord.Embed(
-            title=f"рџ‘‹ Pilot application: {pilot_name}",
+            title=f"👋 Pilot application: {pilot_name}",
             color=0x2b5293 
         )
 
         flights = pilot_data.get("flights", 0)
         hours = pilot_data.get("hours", 0.0)
         rating = pilot_data.get("rating", 0.0)
-        embed.description = f"рџ”ў **{flights} flights** г…¤ вЏ±пёЏ **{hours}h** г…¤ рџџ© **{rating}**\n"
+        embed.description = f"🔢 **{flights} flights** ㅤ ⏱️ **{hours}h** ㅤ 🟩 **{rating}**\n"
 
-        # Р›С–С‚Р°РєРё (РґРёРЅР°РјС–С‡РЅРѕ)
+        # Літаки (динамічно)
         aircraft_list = pilot_data.get("most_active_aircraft", []) 
         if aircraft_list:
-            embed.add_field(name="\u200b\nвњ€пёЏ Most active on type:", value="", inline=False)
+            embed.add_field(name="\u200b\n✈️ Most active on type:", value="", inline=False)
             for ac in aircraft_list[:3]:
                 ac_type = ac.get("type", "Unknown")
                 ac_flights = ac.get("flights", 0)
                 ac_rating = ac.get("rating", 0.0)
                 embed.add_field(name=ac_type, value=f"*flights:* {ac_flights}\n*rating:* {ac_rating}", inline=True)
 
-        # РљРѕРјРїР°РЅС–С— (РґРёРЅР°РјС–С‡РЅРѕ)
+        # Компанії (динамічно)
         airlines_list = pilot_data.get("previous_employment", [])
         if airlines_list:
-            embed.add_field(name="\u200b\nрџ’є Previous employment:", value="", inline=False)
+            embed.add_field(name="\u200b\n💺 Previous employment:", value="", inline=False)
             for airline in airlines_list[:3]:
                 al_name = airline.get("name", airline.get("airline", "Unknown Airline"))
                 al_flights = airline.get("flights", 0)
@@ -4592,7 +4593,7 @@ async def newsky_webhook(request):
         return web.Response(text="OK", status=200)
 
     except Exception as e:
-        print(f"вќЊ Webhook Error: {e}")
+        print(f"❌ Webhook Error: {e}")
         return web.Response(text="Error", status=500)
 
 async def start_web_server():
@@ -4605,7 +4606,7 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"рџЊђ Web-СЃРµСЂРІРµСЂ СѓСЃРїС–С€РЅРѕ Р·Р°РїСѓС‰РµРЅРѕ РЅР° РїРѕСЂС‚Сѓ {port}! (РЁР»СЏС…: /webhook)")
+    print(f"🌐 Web-сервер успішно запущено на порту {port}! (Шлях: /webhook)")
 # ====================================================================
 
 @tasks.loop(minutes=10)
@@ -4629,7 +4630,7 @@ async def check_charters_task():
                 if resp.status == 200:
                     data = await resp.json()
                     
-                    # рџ”Ґ Р’РРљРћР РРЎРўРћР’РЈР„РњРћ РќРћР’РР™ Р¤РђР™Р› РџРђРњ'РЇРўР† рџ”Ґ
+                    # 🔥 ВИКОРИСТОВУЄМО НОВИЙ ФАЙЛ ПАМ'ЯТІ 🔥
                     charters_state = load_charters_state()
                     updated = False
                     
@@ -4638,9 +4639,9 @@ async def check_charters_task():
                         dep_icao = charter.get("dep", {}).get("icao", "")
                         arr_icao = charter.get("arr", {}).get("icao", "")
                         
-                        # РџРµСЂРµРІС–СЂСЏС”РјРѕ, С‡Рё С” РЈРєСЂР°С—РЅР° (UK) Сѓ РІРёР»СЊРѕС‚С– Р°Р±Рѕ РїСЂРёР»СЊРѕС‚С–
+                        # Перевіряємо, чи є Україна (UK) у вильоті або прильоті
                         if dep_icao.startswith("UK") or arr_icao.startswith("UK"):
-                            # РЇРєС‰Рѕ ID С‰Рµ РЅРµРјР°С” РІ charters.json
+                            # Якщо ID ще немає в charters.json
                             if cid not in charters_state:
                                 dep_str = format_airport_string(dep_icao, charter.get("dep", {}).get("name", ""))
                                 arr_str = format_airport_string(arr_icao, charter.get("arr", {}).get("name", ""))
@@ -4652,34 +4653,34 @@ async def check_charters_task():
                                 dist = charter.get("distance", 0)
                                 
                                 desc = (
-                                    f"{dep_str} вћ” {arr_str}\n\n"
-                                    f"рџ“Љ **Contract Info**\n"
-                                    f"в•° рџ‘« Quota: **{quota} Pax**\n"
-                                    f"в•° рџ“Џ Dist: **{dist} nm**\n"
-                                    f"в•° вЏі Exp: **{exp_str}**"
+                                    f"{dep_str} ➔ {arr_str}\n\n"
+                                    f"📊 **Contract Info**\n"
+                                    f"╰ 👫 Quota: **{quota} Pax**\n"
+                                    f"╰ 📏 Dist: **{dist} nm**\n"
+                                    f"╰ ⏳ Exp: **{exp_str}**"
                                 )
                                 
                                 embed = discord.Embed(
                                     title="<:charter:1499317989483221063> New Charter Contract Available!", 
                                     description=desc, 
-                                    color=0xffcc00 # Р–РѕРІС‚РёР№ РєРѕР»С–СЂ
+                                    color=0xffcc00 # Жовтий колір
                                 )
                                 
                                 await channel.send(embed=embed)
                                 
-                                # Р—Р°РїРёСЃСѓС”РјРѕ РІ charters.json
+                                # Записуємо в charters.json
                                 charters_state[cid] = {"notified": True}
                                 updated = True
-                                await asyncio.sleep(1) # РїР°СѓР·Р° РјС–Р¶ РІС–РґРїСЂР°РІРєР°РјРё, С‰РѕР± РЅРµ СЃРїР°РјРёС‚Рё API Discord
+                                await asyncio.sleep(1) # пауза між відправками, щоб не спамити API Discord
                                 
-                    # Р—Р±РµСЂС–РіР°С”РјРѕ С„Р°Р№Р» С‚С–Р»СЊРєРё СЏРєС‰Рѕ Р±СѓР»Рё Р·РЅР°Р№РґРµРЅС– РЅРѕРІС– С‡Р°СЂС‚РµСЂРё
+                    # Зберігаємо файл тільки якщо були знайдені нові чартери
                     if updated:
                         save_charters_state(charters_state)
     except Exception as e:
         print(f"Error checking charters: {e}")
 
 # ====================================================================
-# рџљЂ РќРћР’Рђ РЎРРЎРўР•РњРђ: MASTER GITHUB SYNC (РђР’Р†РђР›Р†РќР†Р‡, РўРЈР Р, РђР•Р РћРџРћР РўР)
+# 🚀 НОВА СИСТЕМА: MASTER GITHUB SYNC (АВІАЛІНІЇ, ТУРИ, АЕРОПОРТИ)
 # ====================================================================
 
 async def fetch_airlines_data(session):
@@ -4785,197 +4786,7 @@ async def fetch_demand_data(session):
     now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     return f"UPDATED: {now_str}\n\n" + "\n\n---\n\n".join(fresh_data)
 
-# Р¤РЈРќРљР¦Р†РЇ Р„Р”РРќРћР“Рћ РљРћРњР†РўРЈ (Р— Р РћР—РЈРњРќРРњР РџРћР’РўРћР РђРњР РўРђ Р›РћР“РђРњР)
-async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
-    if not files_dict or not GITHUB_TOKEN: return False
-    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            # 1. РћС‚СЂРёРјСѓС”РјРѕ SHA РѕСЃС‚Р°РЅРЅСЊРѕРіРѕ РєРѕРјС–С‚Сѓ
-            async with session.get(f"https://api.github.com/repos/{GITHUB_REPO}/git/refs/heads/main", headers=gh_headers) as r:
-                if r.status != 200: 
-                    print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 1) [РЎРїСЂРѕР±Р° {attempt}]: РЎС‚Р°С‚СѓСЃ {r.status}. {await r.text()}")
-                    await asyncio.sleep(2)
-                    continue
-                latest_commit_sha = (await r.json())['object']['sha']
-
-            # 2. РћС‚СЂРёРјСѓС”РјРѕ SHA Р±Р°Р·РѕРІРѕРіРѕ РґРµСЂРµРІР°
-            async with session.get(f"https://api.github.com/repos/{GITHUB_REPO}/git/commits/{latest_commit_sha}", headers=gh_headers) as r:
-                if r.status != 200:
-                    print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 2) [РЎРїСЂРѕР±Р° {attempt}]: РЎС‚Р°С‚СѓСЃ {r.status}")
-                    await asyncio.sleep(2)
-                    continue
-                base_tree_sha = (await r.json())['tree']['sha']
-
-            # 3. Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ РЅРѕРІС– С„Р°Р№Р»Рё СЏРє Blobs
-            tree_items = []
-            for path, content in files_dict.items():
-                async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs", headers=gh_headers, json={"content": content, "encoding": "utf-8"}) as r:
-                    if r.status not in [200, 201]:
-                        print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 3): РќРµ РІРґР°Р»РѕСЃСЏ СЃС‚РІРѕСЂРёС‚Рё Blob РґР»СЏ {path}")
-                        continue
-                    blob_sha = (await r.json())['sha']
-                    tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
-
-            if not tree_items:
-                print("вќЊ Р–РѕРґРµРЅ С„Р°Р№Р» РЅРµ РІРґР°Р»РѕСЃСЏ РІС–РґРїСЂР°РІРёС‚Рё (Blob).")
-                return False
-
-            # 4. РЎС‚РІРѕСЂСЋС”РјРѕ РЅРѕРІРµ РґРµСЂРµРІРѕ
-            async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/trees", headers=gh_headers, json={"base_tree": base_tree_sha, "tree": tree_items}) as r:
-                if r.status not in [200, 201]:
-                    print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 4) [РЎРїСЂРѕР±Р° {attempt}]: РЎС‚Р°С‚СѓСЃ {r.status}")
-                    await asyncio.sleep(2)
-                    continue
-                new_tree_sha = (await r.json())['sha']
-
-            # 5. Р РѕР±РёРјРѕ РєРѕРјС–С‚
-            async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/commits", headers=gh_headers, json={"message": commit_msg, "tree": new_tree_sha, "parents": [latest_commit_sha]}) as r:
-                if r.status not in [200, 201]:
-                    print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 5) [РЎРїСЂРѕР±Р° {attempt}]: РЎС‚Р°С‚СѓСЃ {r.status}")
-                    await asyncio.sleep(2)
-                    continue
-                new_commit_sha = (await r.json())['sha']
-
-            # 6. РћРЅРѕРІР»СЋС”РјРѕ РіС–Р»РєСѓ main
-            async with session.patch(f"https://api.github.com/repos/{GITHUB_REPO}/git/refs/heads/main", headers=gh_headers, json={"sha": new_commit_sha}) as r:
-                if r.status == 200:
-                    return True
-                else:
-                    error_text = await r.text()
-                    print(f"вљ пёЏ GitHub Error (РљСЂРѕРє 6) [РЎРїСЂРѕР±Р° {attempt}]: Р’С–РґС…РёР»РµРЅРѕ РѕРЅРѕРІР»РµРЅРЅСЏ РіС–Р»РєРё. РџСЂРёС‡РёРЅР°: {error_text}")
-                    # РљРѕРЅС„Р»С–РєС‚ РІРµСЂСЃС–Р№! Р§РµРєР°С”РјРѕ 2 СЃРµРєСѓРЅРґРё С– Р№РґРµРјРѕ РЅР° РЅРѕРІРµ РєРѕР»Рѕ (С‰РѕР± РІР·СЏС‚Рё РЅРѕРІРёР№ SHA)
-                    await asyncio.sleep(2)
-                    continue
-
-        except Exception as e:
-            print(f"вќЊ РљСЂРёС‚РёС‡РЅР° РїРѕРјРёР»РєР° Сѓ push_to_github_batch (РЎРїСЂРѕР±Р° {attempt}): {e}")
-            await asyncio.sleep(2)
-
-    print("вќЊ Р’СЃС– 3 СЃРїСЂРѕР±Рё РІС–РґРїСЂР°РІРёС‚Рё РґР°РЅС– РЅР° GitHub РІРёС‡РµСЂРїР°РЅРѕ. Р РµР№СЃ РЅРµ Р·Р°РїРёСЃР°РЅРѕ.")
-    return False
-
-# Р“РћР›РћР’РќРР™ Р”РРЎРџР•РўР§Р•Р 
-@tasks.loop()
-async def master_github_sync_task():
-    # Р РѕР·СЂР°С…РѕРІСѓС”РјРѕ С‡Р°СЃ РґРѕ РїРѕС‡Р°С‚РєСѓ РЅР°СЃС‚СѓРїРЅРѕС— РіРѕРґРёРЅРё (XX:00:00)
-    now = datetime.now(timezone.utc)
-    next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    sleep_seconds = (next_hour - now).total_seconds()
-    
-    print(f"рџ’¤ Р”РёСЃРїРµС‚С‡РµСЂ СЃРёРЅС…СЂРѕРЅС–Р·Р°С†С–С— С‡РµРєР°С” {int(sleep_seconds/60)} С…РІ. РґРѕ {next_hour.strftime('%H:%M')} UTC.")
-    await asyncio.sleep(sleep_seconds)
-
-    # --- РњР РџР РћРљРРќРЈР›РРЎР¬ Р Р†Р’РќРћ Р’ 00 РҐР’РР›РРќ ---
-    current_hour = datetime.now(timezone.utc).hour
-    print(f"рџљЂ Р—Р°РїСѓСЃРє РјР°СЃРѕРІРѕС— СЃРёРЅС…СЂРѕРЅС–Р·Р°С†С–С— (Р“РѕРґРёРЅР°: {current_hour}:00 UTC)")
-    
-    files_to_push = {}
-
-    async with GITHUB_DB_LOCK:
-        async with aiohttp.ClientSession() as session:
-            try:
-                # 1. РђРІС–Р°РєРѕРјРїР°РЅС–С— (Р©РѕРіРѕРґРёРЅРё)
-                airlines_content = await fetch_airlines_data(session)
-                if airlines_content: files_to_push["FLIGHTS/airlines.json"] = airlines_content
-
-                # 2. РўСѓСЂРё С‚Р° РџС–Р»РѕС‚Рё (Р©РѕРіРѕРґРёРЅРё)
-                awards_content, pilots_content = await fetch_awards_data(session)
-                if awards_content and pilots_content:
-                    files_to_push["FLIGHTS/awards.json"] = awards_content
-                    files_to_push["FLIGHTS/pilots_awards.json"] = pilots_content
-
-                # 3. РђРµСЂРѕРїРѕСЂС‚Рё С‚Р° Р§Р°СЂС‚РµСЂРё (Р Р°Р· РЅР° 6 РіРѕРґРёРЅ: 0, 6, 12, 18)
-                if current_hour % 6 == 0:
-                    print("рџЊЌ РџСЂРёР№С€РѕРІ С‡Р°СЃ РѕРЅРѕРІР»СЋРІР°С‚Рё Р°РµСЂРѕРїРѕСЂС‚Рё (6-РіРѕРґРёРЅРЅРёР№ С†РёРєР»)!")
-                    demand_content = await fetch_demand_data(session)
-                    if demand_content:
-                        files_to_push[GITHUB_FILE_PATH] = demand_content
-                        
-                        # рџ”Ґ Р“Р•РќР•Р РЈР„РњРћ РђРќРђР›Р†РўРРљРЈ Р”Рћ РљРћРњР†РўРЈ рџ”Ґ
-                        charter_results = await run_analytics_pipeline(session, demand_content=demand_content)
-                        if charter_results:
-                            files_to_push["newsky-charter-results.txt"] = charter_results
-
-                    # рџҐџ Top-pool + guaranteed bonus awards (С‚РѕР№ СЃР°РјРёР№ 6-РіРѕРґРёРЅРЅРёР№ С†РёРєР»)
-                    top_bonus_files = await run_top_bonus_pipeline(session)
-                    if top_bonus_files:
-                        files_to_push.update(top_bonus_files)
-
-                # 4. Р¤Р†РќРђР›Р¬РќРР™ РџРЈРЁ Р’РЎР¬РћР“Рћ РћР”РќРРњ РљРћРњР†РўРћРњ
-                if files_to_push:
-                    success = await push_to_github_batch(session, files_to_push, f"рџ¤– Master Sync: Hour {current_hour} UTC update")
-                    if success:
-                        print(f"вњ… РЈСЃРїС–С€РЅРёР№ Batch-Commit! РћРЅРѕРІР»РµРЅРѕ С„Р°Р№Р»С–РІ: {len(files_to_push)}")
-                    else:
-                        print("вќЊ РџРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ РјР°СЃРѕРІРѕРіРѕ Р·Р°РїРёСЃСѓ РЅР° GitHub.")
-
-            except Exception as e:
-                print(f"вќЊ РџРѕРјРёР»РєР° РІ Master Sync Task: {e}")
-
-# ==========================================
-# ANALYTICS PIPELINE: REPORT & CHARTERS
-# ==========================================
-
-async def run_analytics_pipeline(session, demand_content=None, ctx=None):
-    if ctx: await ctx.send("вЏі Step 1: Preparing data and downloading scripts...")
-
-    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.raw"}
-    base_raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
-
-    # 1. Р—Р°РїРёСЃСѓС”РјРѕ Р±Р°Р·Сѓ Р°РµСЂРѕРїРѕСЂС‚С–РІ Р›РћРљРђР›Р¬РќРћ РґР»СЏ СЃРєСЂРёРїС‚С–РІ
-    if demand_content:
-        with open("newsky-airports.txt", "w", encoding="utf-8") as f:
-            f.write(demand_content)
-    else:
-        # РЇРєС‰Рѕ РґР°РЅРёС… РЅРµРјР°С” (СЂСѓС‡РЅРёР№ Р·Р°РїСѓСЃРє Р±РµР· РѕРЅРѕРІР»РµРЅРЅСЏ), РєР°С‡Р°С”РјРѕ Р· РіС–С‚С…Р°Р±Сѓ
-        async with session.get(f"{base_raw_url}/newsky-airports.txt", headers=gh_headers) as resp:
-            if resp.status == 200:
-                with open("newsky-airports.txt", "wb") as f:
-                    f.write(await resp.read())
-            else:
-                if ctx: await ctx.send("вќЊ Error: Could not fetch newsky-airports.txt from GitHub.")
-                return None
-
-    # 2. РљР°С‡Р°С”РјРѕ СЃРєСЂРёРїС‚Рё
-    scripts = ["newsky_report.py", "newsky_charter_with_tops_v4.py"]
-    for file_name in scripts:
-        async with session.get(f"{base_raw_url}/{file_name}", headers=gh_headers) as resp:
-            if resp.status == 200:
-                with open(file_name, "wb") as f:
-                    f.write(await resp.read())
-            else:
-                if ctx: await ctx.send(f"вќЊ Error downloading {file_name}: HTTP {resp.status}")
-                return None
-
-    if ctx: await ctx.send("вљ™пёЏ **Step 2: Running analytics (Report вћ” Charters)...**")
-
-    # 3. Р—Р°РїСѓСЃРєР°С”РјРѕ РѕР±С‡РёСЃР»РµРЅРЅСЏ
-    try:
-        subprocess.run([sys.executable, "newsky_report.py"], check=True, capture_output=True, text=True)
-        subprocess.run([sys.executable, "newsky_charter_with_tops_v4.py"], check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        if ctx: await ctx.send(f"вќЊ **Script Error!**\n{e.stderr[-1000:]}")
-        return None
-
-    if not os.path.exists("newsky-charter-results.txt"):
-        if ctx: await ctx.send("вќЊ File `newsky-charter-results.txt` was not created.")
-        return None
-
-    # 4. Р§РёС‚Р°С”РјРѕ РіРѕС‚РѕРІРёР№ СЂРµР·СѓР»СЊС‚Р°С‚
-    with open("newsky-charter-results.txt", "r", encoding="utf-8") as f:
-        final_text = f.read()
-
-    # 5. РџСЂРёР±РёСЂР°С”РјРѕ РІСЃС– С‚РёРјС‡Р°СЃРѕРІС– С„Р°Р№Р»Рё
-    cleanup_files = scripts + ["newsky-airports.txt", "newsky-airports-report.txt", "newsky-charter-results.txt"]
-    for f in cleanup_files:
-        if os.path.exists(f):
-            os.remove(f)
-
-    # 6. РџРѕРІРµСЂС‚Р°С”РјРѕ С‚РµРєСЃС‚ (С‰РѕР± РіРѕР»РѕРІРЅРёР№ С†РёРєР» Р·Р°РєРёРЅСѓРІ Р№РѕРіРѕ РІ Batch-Commit)
-    if ctx: await ctx.send("вњ… **Analytics completed locally! Ready to push.**")
-    return final_text
+# ФУНКЦІЯ ЄДИНОГО КОМІТУ (З РОЗУМНИМИ ПОВТОРАМИ ТА ЛОГАМИ)
 
 async def github_download_file(session, remote_path, local_path, required=True):
     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.raw", "Cache-Control": "no-cache"}
@@ -4986,7 +4797,7 @@ async def github_download_file(session, remote_path, local_path, required=True):
             local_path.write_bytes(await resp.read())
             return True
         if required:
-            print(f"вќЊ РќРµ РІРґР°Р»РѕСЃСЏ СЃРєР°С‡Р°С‚Рё {remote_path}: HTTP {resp.status}")
+            print(f"TOPSYNC_WARN: cannot download {remote_path}: HTTP {resp.status}")
         return False
 
 async def github_list_directory(session, remote_dir):
@@ -4994,7 +4805,7 @@ async def github_list_directory(session, remote_dir):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{remote_dir}?t={int(time.time())}"
     async with session.get(url, headers=gh_headers) as resp:
         if resp.status != 200:
-            print(f"вљ пёЏ РќРµ РІРґР°Р»РѕСЃСЏ РїСЂРѕС‡РёС‚Р°С‚Рё РїР°РїРєСѓ {remote_dir}: HTTP {resp.status}")
+            print(f"TOPSYNC_WARN: cannot read directory {remote_dir}: HTTP {resp.status}")
             return []
         data = await resp.json()
         return data if isinstance(data, list) else []
@@ -5025,24 +4836,17 @@ async def run_top_bonus_pipeline(session, ctx=None):
         print(f"TOPSYNC_FAIL: {reason}")
         if ctx:
             try:
-                await ctx.send(f"вќЊ **Top/Bonus Sync Р·СѓРїРёРЅРёРІСЃСЏ:** {reason}")
+                await ctx.send(f"ERROR: Top/Bonus Sync stopped: {reason}")
             except Exception:
                 pass
         return None
 
-    """Builds top-pool and guaranteed bonus JSON using the site JS scripts.
-
-    This runs inside the existing Railway bot during the 6-hour master sync.
-    It does not create a second Railway service. It prepares a temporary
-    working copy from GitHub, runs the checked-in Node scripts, and returns
-    only changed generated files for the existing batch GitHub commit.
-    """
     if not GITHUB_TOKEN:
-        return await fail_top_sync("РЅРµРјР°С” GITHUB_TOKEN Сѓ Railway Variables")
+        return await fail_top_sync("missing GITHUB_TOKEN in Railway Variables")
 
     node_bin = shutil.which("node")
     if not node_bin:
-        return await fail_top_sync("Node.js РЅРµ Р·РЅР°Р№РґРµРЅРѕ Сѓ Railway image. РџРµСЂРµРІС–СЂ Railpack packages / build logs.")
+        return await fail_top_sync("Node.js not found in Railway image. Check Railpack packages / build logs.")
 
     workdir = Path("/tmp/ucaa-top-bonus-sync")
     if workdir.exists():
@@ -5053,50 +4857,57 @@ async def run_top_bonus_pipeline(session, ctx=None):
 
     required_files = [
         "ADcoordinates.json",
-        "aircraft-difficulty-coefficients.js",
         "scripts/update-top-pool.js",
         "scripts/update-guaranteed-bonuses.js",
         "COMPANY/livery-matching.json",
         "COMPANY/ucaa-livery-database.json",
         "COMPANY/guaranteed-bonuses.json",
-        "FLIGHTS/manifest.json"
+        "FLIGHTS/manifest.json",
     ]
     optional_files = [
         "COMPANY/top-pool-current.json",
         "COMPANY/top-awards-log.json",
-        "FLIGHTS/archive.json"
+        "FLIGHTS/archive.json",
     ]
 
     for remote_path in required_files:
         ok = await github_download_file(session, remote_path, workdir / remote_path, required=True)
         if not ok:
-            return await fail_top_sync(f"РЅРµ РІРґР°Р»РѕСЃСЏ СЃРєР°С‡Р°С‚Рё РѕР±РѕРІ'СЏР·РєРѕРІРёР№ С„Р°Р№Р» Р· GitHub: {remote_path}")
+            return await fail_top_sync(f"cannot download required GitHub file: {remote_path}")
     for remote_path in optional_files:
         await github_download_file(session, remote_path, workdir / remote_path, required=False)
 
-    difficulty_file = workdir / "aircraft-difficulty-coefficients.js"
-    if not difficulty_file.exists():
-        live_url = "https://kazuar.in.ua/aircraft-difficulty-coefficients.js"
-        try:
-            async with session.get(live_url, headers={"Cache-Control": "no-cache"}) as resp:
-                if resp.status == 200:
-                    difficulty_file.write_bytes(await resp.read())
-                    print("✅ aircraft-difficulty-coefficients.js downloaded from live site fallback.")
-                else:
-                    return await fail_top_sync(f"aircraft-difficulty-coefficients.js missing; live fallback HTTP {resp.status}")
-        except Exception as e:
-            return await fail_top_sync(f"aircraft-difficulty-coefficients.js missing; live fallback error: {e}")
-    if not difficulty_file.exists():
-        return await fail_top_sync("aircraft-difficulty-coefficients.js missing before Node run")
+    support_root_files = [
+        "aircraft-difficulty-coefficients.js",
+        "pilot-pay-policy.js",
+        "newsky-charter-results.txt",
+    ]
+    for support_file in support_root_files:
+        target = workdir / support_file
+        await github_download_file(session, support_file, target, required=False)
+        if not target.exists():
+            live_url = f"https://kazuar.in.ua/{support_file}"
+            try:
+                async with session.get(live_url, headers={"Cache-Control": "no-cache"}) as resp:
+                    if resp.status == 200:
+                        target.write_bytes(await resp.read())
+                        print(f"TOPSYNC_INFO: {support_file} downloaded from live site fallback.")
+                    elif support_file != "newsky-charter-results.txt":
+                        return await fail_top_sync(f"{support_file} missing; live fallback HTTP {resp.status}")
+            except Exception as e:
+                if support_file != "newsky-charter-results.txt":
+                    return await fail_top_sync(f"{support_file} missing; live fallback error: {e}")
+        if support_file != "newsky-charter-results.txt" and not target.exists():
+            return await fail_top_sync(f"{support_file} missing before Node run")
 
     flights_count = await github_download_json_directory(session, "FLIGHTS", workdir / "FLIGHTS")
     top_archives_count = await github_download_json_directory(session, "COMPANY/TOP-POOLS", workdir / "COMPANY" / "TOP-POOLS")
-    print(f"рџ“¦ Top/bonus workspace РіРѕС‚РѕРІРёР№: FLIGHTS json={flights_count}, TOP-POOLS json={top_archives_count}")
+    print(f"TOPSYNC_INFO: workspace ready: FLIGHTS json={flights_count}, TOP-POOLS json={top_archives_count}")
 
     tracked_paths = [
         "COMPANY/top-pool-current.json",
         "COMPANY/top-awards-log.json",
-        "COMPANY/guaranteed-bonuses.json"
+        "COMPANY/guaranteed-bonuses.json",
     ]
     for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
         tracked_paths.append(str(top_file.relative_to(workdir)).replace("\\", "/"))
@@ -5110,8 +4921,8 @@ async def run_top_bonus_pipeline(session, ctx=None):
         subprocess.run([node_bin, "scripts/update-top-pool.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
         subprocess.run([node_bin, "scripts/update-guaranteed-bonuses.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
     except subprocess.CalledProcessError as e:
-        detail = f"JS script failed with exit {e.returncode}. STDOUT: {(e.stdout or '')[-700:]} STDERR: {(e.stderr or '')[-700:]}"
-        return await fail_top_sync(detail[:1700])
+        detail = f"JS script failed with exit {e.returncode}. STDOUT: {(e.stdout or '')[-900:]} STDERR: {(e.stderr or '')[-900:]}"
+        return await fail_top_sync(detail[:1900])
     except subprocess.TimeoutExpired as e:
         return await fail_top_sync(f"JS script timeout: {e}")
 
@@ -5126,33 +4937,218 @@ async def run_top_bonus_pipeline(session, ctx=None):
         content = read_text_safe(full_path)
         if content is None:
             continue
-        if content != before.get(rel_path):
+        if before.get(rel_path) != content:
             files_to_push[rel_path] = content
-
-    if files_to_push:
-        print(f"рџҐџ Top/bonus sync РїС–РґРіРѕС‚СѓРІР°РІ С„Р°Р№Р»С–РІ РґРѕ РєРѕРјС–С‚Сѓ: {len(files_to_push)}")
-    else:
-        print("вњ… Top/bonus sync: Р·РјС–РЅ РЅРµРјР°С”.")
     return files_to_push
+
+async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
+    if not files_dict or not GITHUB_TOKEN: return False
+    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            # 1. Отримуємо SHA останнього коміту
+            async with session.get(f"https://api.github.com/repos/{GITHUB_REPO}/git/refs/heads/main", headers=gh_headers) as r:
+                if r.status != 200: 
+                    print(f"⚠️ GitHub Error (Крок 1) [Спроба {attempt}]: Статус {r.status}. {await r.text()}")
+                    await asyncio.sleep(2)
+                    continue
+                latest_commit_sha = (await r.json())['object']['sha']
+
+            # 2. Отримуємо SHA базового дерева
+            async with session.get(f"https://api.github.com/repos/{GITHUB_REPO}/git/commits/{latest_commit_sha}", headers=gh_headers) as r:
+                if r.status != 200:
+                    print(f"⚠️ GitHub Error (Крок 2) [Спроба {attempt}]: Статус {r.status}")
+                    await asyncio.sleep(2)
+                    continue
+                base_tree_sha = (await r.json())['tree']['sha']
+
+            # 3. Завантажуємо нові файли як Blobs
+            tree_items = []
+            for path, content in files_dict.items():
+                async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs", headers=gh_headers, json={"content": content, "encoding": "utf-8"}) as r:
+                    if r.status not in [200, 201]:
+                        print(f"⚠️ GitHub Error (Крок 3): Не вдалося створити Blob для {path}")
+                        continue
+                    blob_sha = (await r.json())['sha']
+                    tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
+
+            if not tree_items:
+                print("❌ Жоден файл не вдалося відправити (Blob).")
+                return False
+
+            # 4. Створюємо нове дерево
+            async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/trees", headers=gh_headers, json={"base_tree": base_tree_sha, "tree": tree_items}) as r:
+                if r.status not in [200, 201]:
+                    print(f"⚠️ GitHub Error (Крок 4) [Спроба {attempt}]: Статус {r.status}")
+                    await asyncio.sleep(2)
+                    continue
+                new_tree_sha = (await r.json())['sha']
+
+            # 5. Робимо коміт
+            async with session.post(f"https://api.github.com/repos/{GITHUB_REPO}/git/commits", headers=gh_headers, json={"message": commit_msg, "tree": new_tree_sha, "parents": [latest_commit_sha]}) as r:
+                if r.status not in [200, 201]:
+                    print(f"⚠️ GitHub Error (Крок 5) [Спроба {attempt}]: Статус {r.status}")
+                    await asyncio.sleep(2)
+                    continue
+                new_commit_sha = (await r.json())['sha']
+
+            # 6. Оновлюємо гілку main
+            async with session.patch(f"https://api.github.com/repos/{GITHUB_REPO}/git/refs/heads/main", headers=gh_headers, json={"sha": new_commit_sha}) as r:
+                if r.status == 200:
+                    return True
+                else:
+                    error_text = await r.text()
+                    print(f"⚠️ GitHub Error (Крок 6) [Спроба {attempt}]: Відхилено оновлення гілки. Причина: {error_text}")
+                    # Конфлікт версій! Чекаємо 2 секунди і йдемо на нове коло (щоб взяти новий SHA)
+                    await asyncio.sleep(2)
+                    continue
+
+        except Exception as e:
+            print(f"❌ Критична помилка у push_to_github_batch (Спроба {attempt}): {e}")
+            await asyncio.sleep(2)
+
+    print("❌ Всі 3 спроби відправити дані на GitHub вичерпано. Рейс не записано.")
+    return False
+
+# ГОЛОВНИЙ ДИСПЕТЧЕР
+@tasks.loop()
+async def master_github_sync_task():
+    # Розраховуємо час до початку наступної години (XX:00:00)
+    now = datetime.now(timezone.utc)
+    next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    sleep_seconds = (next_hour - now).total_seconds()
+    
+    print(f"💤 Диспетчер синхронізації чекає {int(sleep_seconds/60)} хв. до {next_hour.strftime('%H:%M')} UTC.")
+    await asyncio.sleep(sleep_seconds)
+
+    # --- МИ ПРОКИНУЛИСЬ РІВНО В 00 ХВИЛИН ---
+    current_hour = datetime.now(timezone.utc).hour
+    print(f"🚀 Запуск масової синхронізації (Година: {current_hour}:00 UTC)")
+    
+    files_to_push = {}
+
+    async with GITHUB_DB_LOCK:
+        async with aiohttp.ClientSession() as session:
+            try:
+                # 1. Авіакомпанії (Щогодини)
+                airlines_content = await fetch_airlines_data(session)
+                if airlines_content: files_to_push["FLIGHTS/airlines.json"] = airlines_content
+
+                # 2. Тури та Пілоти (Щогодини)
+                awards_content, pilots_content = await fetch_awards_data(session)
+                if awards_content and pilots_content:
+                    files_to_push["FLIGHTS/awards.json"] = awards_content
+                    files_to_push["FLIGHTS/pilots_awards.json"] = pilots_content
+
+                # 3. Аеропорти та Чартери (Раз на 6 годин: 0, 6, 12, 18)
+                if current_hour % 6 == 0:
+                    print("🌍 Прийшов час оновлювати аеропорти (6-годинний цикл)!")
+                    demand_content = await fetch_demand_data(session)
+                    if demand_content:
+                        files_to_push[GITHUB_FILE_PATH] = demand_content
+                        
+                        # 🔥 ГЕНЕРУЄМО АНАЛІТИКУ ДО КОМІТУ 🔥
+                        charter_results = await run_analytics_pipeline(session, demand_content=demand_content)
+                        if charter_results:
+                            files_to_push["newsky-charter-results.txt"] = charter_results
+
+                    # Top-pool + guaranteed bonus awards (same 6-hour cycle)
+                    top_bonus_files = await run_top_bonus_pipeline(session)
+                    if top_bonus_files:
+                        files_to_push.update(top_bonus_files)
+
+                # 4. ФІНАЛЬНИЙ ПУШ ВСЬОГО ОДНИМ КОМІТОМ
+                if files_to_push:
+                    success = await push_to_github_batch(session, files_to_push, f"🤖 Master Sync: Hour {current_hour} UTC update")
+                    if success:
+                        print(f"✅ Успішний Batch-Commit! Оновлено файлів: {len(files_to_push)}")
+                    else:
+                        print("❌ Помилка під час масового запису на GitHub.")
+
+            except Exception as e:
+                print(f"❌ Помилка в Master Sync Task: {e}")
+
+# ==========================================
+# ANALYTICS PIPELINE: REPORT & CHARTERS
+# ==========================================
+
+async def run_analytics_pipeline(session, demand_content=None, ctx=None):
+    if ctx: await ctx.send("⏳ Step 1: Preparing data and downloading scripts...")
+
+    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.raw"}
+    base_raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
+
+    # 1. Записуємо базу аеропортів ЛОКАЛЬНО для скриптів
+    if demand_content:
+        with open("newsky-airports.txt", "w", encoding="utf-8") as f:
+            f.write(demand_content)
+    else:
+        # Якщо даних немає (ручний запуск без оновлення), качаємо з гітхабу
+        async with session.get(f"{base_raw_url}/newsky-airports.txt", headers=gh_headers) as resp:
+            if resp.status == 200:
+                with open("newsky-airports.txt", "wb") as f:
+                    f.write(await resp.read())
+            else:
+                if ctx: await ctx.send("❌ Error: Could not fetch newsky-airports.txt from GitHub.")
+                return None
+
+    # 2. Качаємо скрипти
+    scripts = ["newsky_report.py", "newsky_charter_with_tops_v4.py"]
+    for file_name in scripts:
+        async with session.get(f"{base_raw_url}/{file_name}", headers=gh_headers) as resp:
+            if resp.status == 200:
+                with open(file_name, "wb") as f:
+                    f.write(await resp.read())
+            else:
+                if ctx: await ctx.send(f"❌ Error downloading {file_name}: HTTP {resp.status}")
+                return None
+
+    if ctx: await ctx.send("⚙️ **Step 2: Running analytics (Report ➔ Charters)...**")
+
+    # 3. Запускаємо обчислення
+    try:
+        subprocess.run([sys.executable, "newsky_report.py"], check=True, capture_output=True, text=True)
+        subprocess.run([sys.executable, "newsky_charter_with_tops_v4.py"], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        if ctx: await ctx.send(f"❌ **Script Error!**\n{e.stderr[-1000:]}")
+        return None
+
+    if not os.path.exists("newsky-charter-results.txt"):
+        if ctx: await ctx.send("❌ File `newsky-charter-results.txt` was not created.")
+        return None
+
+    # 4. Читаємо готовий результат
+    with open("newsky-charter-results.txt", "r", encoding="utf-8") as f:
+        final_text = f.read()
+
+    # 5. Прибираємо всі тимчасові файли
+    cleanup_files = scripts + ["newsky-airports.txt", "newsky-airports-report.txt", "newsky-charter-results.txt"]
+    for f in cleanup_files:
+        if os.path.exists(f):
+            os.remove(f)
+
+    # 6. Повертаємо текст (щоб головний цикл закинув його в Batch-Commit)
+    if ctx: await ctx.send("✅ **Analytics completed locally! Ready to push.**")
+    return final_text
 	
-# --- рџљЂ Р—РђРџРЈРЎРљ Р“РћР›РћР’РќРћР“Рћ Р¦РРљР›РЈ ---
+# --- 🚀 ЗАПУСК ГОЛОВНОГО ЦИКЛУ ---
 @client.event
 async def on_ready():
     global MONITORING_STARTED
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
     
-    # Р—Р°РїСѓСЃРєР°С”РјРѕ С”РґРёРЅРёР№ СЂРѕР·СѓРјРЅРёР№ РґРёСЃРїРµС‚С‡РµСЂ Р·Р°РјС–СЃС‚СЊ С‚СЂСЊРѕС… СЃС‚Р°СЂРёС…!
+    # Запускаємо єдиний розумний диспетчер замість трьох старих!
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
-        print("рџ¤– Master GitHub Sync Dispatcher started!")
+        print("🤖 Master GitHub Sync Dispatcher started!")
 
-    print(f"вњ… Bot online: {client.user}")
-    print("рџљЂ MONITORING STARTED")
+    print(f"✅ Bot online: {client.user}")
+    print("🚀 MONITORING STARTED")
     client.loop.create_task(status_loop())
     client.loop.create_task(main_loop())
     client.loop.create_task(start_web_server())
 
 client.run(DISCORD_TOKEN)
-
 
