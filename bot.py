@@ -1765,6 +1765,8 @@ async def on_message(message):
             async with GITHUB_DB_LOCK:
                 async with aiohttp.ClientSession() as session:
                     files_to_push = await run_top_bonus_pipeline(session, ctx=message.channel)
+                    if files_to_push is None:
+                        return await status_msg.edit(content="❌ **Top/Bonus Sync не виконався.** Дивись Railway logs: найчастіше причина — немає Node.js або не скачався потрібний файл з GitHub.")
                     if not files_to_push:
                         return await status_msg.edit(content="✅ **Top/Bonus Sync завершено:** змін для GitHub немає.")
 
@@ -5028,12 +5030,12 @@ async def run_top_bonus_pipeline(session, ctx=None):
     """
     if not GITHUB_TOKEN:
         print("⚠️ Немає GITHUB_TOKEN: top/bonus sync пропущено.")
-        return {}
+        return None
 
     node_bin = shutil.which("node")
     if not node_bin:
         print("⚠️ Node.js не знайдено у Railway image: top/bonus sync пропущено. Додай Node у build environment.")
-        return {}
+        return None
 
     workdir = Path("/tmp/ucaa-top-bonus-sync")
     if workdir.exists():
@@ -5060,7 +5062,7 @@ async def run_top_bonus_pipeline(session, ctx=None):
     for remote_path in required_files:
         ok = await github_download_file(session, remote_path, workdir / remote_path, required=True)
         if not ok:
-            return {}
+            return None
     for remote_path in optional_files:
         await github_download_file(session, remote_path, workdir / remote_path, required=False)
 
@@ -5086,10 +5088,10 @@ async def run_top_bonus_pipeline(session, ctx=None):
         subprocess.run([node_bin, "scripts/update-guaranteed-bonuses.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
     except subprocess.CalledProcessError as e:
         print(f"❌ Top/bonus JS помилка:\nSTDOUT:\n{e.stdout[-1500:]}\nSTDERR:\n{e.stderr[-1500:]}")
-        return {}
+        return None
     except subprocess.TimeoutExpired as e:
         print(f"❌ Top/bonus JS timeout: {e}")
-        return {}
+        return None
 
     for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
         rel_path = str(top_file.relative_to(workdir)).replace("\\", "/")
@@ -5130,4 +5132,5 @@ async def on_ready():
     client.loop.create_task(start_web_server())
 
 client.run(DISCORD_TOKEN)
+
 

@@ -1,0 +1,7 @@
+providers = ["python", "node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
+[start]
+cmd = "python bot.py"
