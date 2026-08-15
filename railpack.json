@@ -1,0 +1,11 @@
+﻿{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": {
+    "python": "3.13",
+    "node": "22"
+  },
+  "deploy": {
+    "startCommand": "python bot.py"
+  }
+}
