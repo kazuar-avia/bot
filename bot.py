@@ -4868,6 +4868,11 @@ async def master_github_sync_task():
                         if charter_results:
                             files_to_push["newsky-charter-results.txt"] = charter_results
 
+                    # 🥟 Top-pool + guaranteed bonus awards (той самий 6-годинний цикл)
+                    top_bonus_files = await run_top_bonus_pipeline(session)
+                    if top_bonus_files:
+                        files_to_push.update(top_bonus_files)
+
                 # 4. ФІНАЛЬНИЙ ПУШ ВСЬОГО ОДНИМ КОМІТОМ
                 if files_to_push:
                     success = await push_to_github_batch(session, files_to_push, f"🤖 Master Sync: Hour {current_hour} UTC update")
@@ -4941,6 +4946,142 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None):
     # 6. Повертаємо текст (щоб головний цикл закинув його в Batch-Commit)
     if ctx: await ctx.send("✅ **Analytics completed locally! Ready to push.**")
     return final_text
+
+async def github_download_file(session, remote_path, local_path, required=True):
+    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.raw", "Cache-Control": "no-cache"}
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{remote_path}?t={int(time.time())}"
+    async with session.get(url, headers=gh_headers) as resp:
+        if resp.status == 200:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(await resp.read())
+            return True
+        if required:
+            print(f"❌ Не вдалося скачати {remote_path}: HTTP {resp.status}")
+        return False
+
+async def github_list_directory(session, remote_dir):
+    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json", "Cache-Control": "no-cache"}
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{remote_dir}?t={int(time.time())}"
+    async with session.get(url, headers=gh_headers) as resp:
+        if resp.status != 200:
+            print(f"⚠️ Не вдалося прочитати папку {remote_dir}: HTTP {resp.status}")
+            return []
+        data = await resp.json()
+        return data if isinstance(data, list) else []
+
+async def github_download_json_directory(session, remote_dir, local_dir):
+    items = await github_list_directory(session, remote_dir)
+    downloaded = 0
+    for item in items:
+        name = item.get("name", "")
+        item_type = item.get("type", "")
+        item_path = item.get("path", f"{remote_dir}/{name}")
+        if item_type == "dir":
+            downloaded += await github_download_json_directory(session, item_path, local_dir / name)
+        elif item_type == "file" and name.lower().endswith(".json"):
+            if await github_download_file(session, item_path, local_dir / name, required=False):
+                downloaded += 1
+        await asyncio.sleep(0.05)
+    return downloaded
+
+def read_text_safe(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+async def run_top_bonus_pipeline(session, ctx=None):
+    """Builds top-pool and guaranteed bonus JSON using the site JS scripts.
+
+    This runs inside the existing Railway bot during the 6-hour master sync.
+    It does not create a second Railway service. It prepares a temporary
+    working copy from GitHub, runs the checked-in Node scripts, and returns
+    only changed generated files for the existing batch GitHub commit.
+    """
+    if not GITHUB_TOKEN:
+        print("⚠️ Немає GITHUB_TOKEN: top/bonus sync пропущено.")
+        return {}
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        print("⚠️ Node.js не знайдено у Railway image: top/bonus sync пропущено. Додай Node у build environment.")
+        return {}
+
+    workdir = Path("/tmp/ucaa-top-bonus-sync")
+    if workdir.exists():
+        shutil.rmtree(workdir, ignore_errors=True)
+    (workdir / "scripts").mkdir(parents=True, exist_ok=True)
+    (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
+    (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
+
+    required_files = [
+        "ADcoordinates.json",
+        "scripts/update-top-pool.js",
+        "scripts/update-guaranteed-bonuses.js",
+        "COMPANY/livery-matching.json",
+        "COMPANY/ucaa-livery-database.json",
+        "COMPANY/guaranteed-bonuses.json",
+        "FLIGHTS/manifest.json"
+    ]
+    optional_files = [
+        "COMPANY/top-pool-current.json",
+        "COMPANY/top-awards-log.json",
+        "FLIGHTS/archive.json"
+    ]
+
+    for remote_path in required_files:
+        ok = await github_download_file(session, remote_path, workdir / remote_path, required=True)
+        if not ok:
+            return {}
+    for remote_path in optional_files:
+        await github_download_file(session, remote_path, workdir / remote_path, required=False)
+
+    flights_count = await github_download_json_directory(session, "FLIGHTS", workdir / "FLIGHTS")
+    top_archives_count = await github_download_json_directory(session, "COMPANY/TOP-POOLS", workdir / "COMPANY" / "TOP-POOLS")
+    print(f"📦 Top/bonus workspace готовий: FLIGHTS json={flights_count}, TOP-POOLS json={top_archives_count}")
+
+    tracked_paths = [
+        "COMPANY/top-pool-current.json",
+        "COMPANY/top-awards-log.json",
+        "COMPANY/guaranteed-bonuses.json"
+    ]
+    for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
+        tracked_paths.append(str(top_file.relative_to(workdir)).replace("\\", "/"))
+    before = {path: read_text_safe(workdir / path) for path in tracked_paths}
+
+    env = os.environ.copy()
+    if NEWSKY_API_KEY and not env.get("NEWSKY_AIRLINE_TOKEN"):
+        env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
+
+    try:
+        subprocess.run([node_bin, "scripts/update-top-pool.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
+        subprocess.run([node_bin, "scripts/update-guaranteed-bonuses.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Top/bonus JS помилка:\nSTDOUT:\n{e.stdout[-1500:]}\nSTDERR:\n{e.stderr[-1500:]}")
+        return {}
+    except subprocess.TimeoutExpired as e:
+        print(f"❌ Top/bonus JS timeout: {e}")
+        return {}
+
+    for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
+        rel_path = str(top_file.relative_to(workdir)).replace("\\", "/")
+        if rel_path not in tracked_paths:
+            tracked_paths.append(rel_path)
+
+    files_to_push = {}
+    for rel_path in tracked_paths:
+        full_path = workdir / rel_path
+        content = read_text_safe(full_path)
+        if content is None:
+            continue
+        if content != before.get(rel_path):
+            files_to_push[rel_path] = content
+
+    if files_to_push:
+        print(f"🥟 Top/bonus sync підготував файлів до коміту: {len(files_to_push)}")
+    else:
+        print("✅ Top/bonus sync: змін немає.")
+    return files_to_push
 	
 # --- 🚀 ЗАПУСК ГОЛОВНОГО ЦИКЛУ ---
 @client.event
