@@ -1754,6 +1754,34 @@ async def on_message(message):
                         is_admin = True
                 except:
                     pass
+
+    # --- 🥟 КОМАНДА: !topsync (ручний запуск top-pool + guaranteed bonuses) ---
+    if message.content.strip().lower() == "!topsync":
+        if not is_admin:
+            return await message.channel.send("🚫 **Access Denied**")
+
+        status_msg = await message.channel.send("🥟 **Запускаю ручний Top/Bonus Sync...**\nСкачую бойові файли з GitHub і формую новий пул.")
+        try:
+            async with GITHUB_DB_LOCK:
+                async with aiohttp.ClientSession() as session:
+                    files_to_push = await run_top_bonus_pipeline(session, ctx=message.channel)
+                    if not files_to_push:
+                        return await status_msg.edit(content="✅ **Top/Bonus Sync завершено:** змін для GitHub немає.")
+
+                    summary = "\n".join(f"• `{path}`" for path in files_to_push.keys())
+                    if len(summary) > 1500:
+                        summary = summary[:1500] + "\n• ..."
+                    await status_msg.edit(content=f"📦 **Top/Bonus Sync сформував {len(files_to_push)} файлів:**\n{summary}\n\n⏳ Пушу одним комітом...")
+
+                    success = await push_to_github_batch(session, files_to_push, "🥟 Manual Top/Bonus Sync")
+                    if success:
+                        await status_msg.edit(content=f"✅ **Top/Bonus Sync успішно записано на GitHub.**\nОновлено файлів: **{len(files_to_push)}**\n{summary}")
+                    else:
+                        await status_msg.edit(content="❌ **Top/Bonus Sync сформував файли, але GitHub push не вдався.** Дивись Railway logs.")
+        except Exception as e:
+            print(f"❌ !topsync error: {e}")
+            await status_msg.edit(content=f"❌ **Top/Bonus Sync error:** `{str(e)[:1500]}`")
+        return
     
     # --- 📥 КОМАНДА: !cache (СКАЧАТИ ВСІ ФАЙЛИ ПАМ'ЯТІ) ---
     if message.content == "!cache":
