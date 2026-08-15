@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from itertools import cycle
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from aiohttp import web
 from discord.ext import tasks
 
@@ -42,6 +43,14 @@ ADMIN_IDS = [
 ]
 
 START_TIME = datetime.now(timezone.utc)
+
+# Реальний часовий пояс Києва з автоматичним переходом UTC+2 / UTC+3.
+# Fallback залишає стару поведінку UTC+3, якщо в системі раптом немає tzdata.
+try:
+    KYIV_TZ = ZoneInfo("Europe/Kyiv")
+except Exception:
+    KYIV_TZ = timezone(timedelta(hours=3))
+    print("⚠️ Europe/Kyiv timezone data not found; using UTC+3 fallback.")
 
 STATE_FILE = Path("/app/data/sent.json")
 HIDDEN_FILE = Path("/app/data/hidden.json")
@@ -1314,52 +1323,46 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
             return None
 
 # --- РОЗУМНА СИСТЕМА СТАТУСІВ З ГРАФІКОМ (КИЇВСЬКИЙ ЧАС) ---
+async def change_status():
+    """Перемикає текстовий статус і правильний Discord presence за київським часом."""
+    kyiv_time = datetime.now(KYIV_TZ)
+    hour = kyiv_time.hour
+
+    # 1. ВИЗНАЧАЄМО МЕРЕЖЕВИЙ СТАТУС (КОЛІР) ЗА ГРАФІКОМ
+    if 8 <= hour < 12:
+        discord_status = discord.Status.online      # 08:00 - 12:00: В мережі (Зелений)
+    elif 12 <= hour < 14:
+        discord_status = discord.Status.idle        # 12:00 - 14:00: Відійшов (Жовтий місяць)
+    elif 14 <= hour < 20:
+        discord_status = discord.Status.online      # 14:00 - 20:00: В мережі (Зелений)
+    else:
+        discord_status = discord.Status.dnd         # 20:00 - 08:00: Не турбувати (Червоний)
+
+    # 2. ВИЗНАЧАЄМО ТЕКСТОВИЙ СТАТУС
+    current_status = next(status_cycle)
+    activity_type = discord.ActivityType.playing
+    if current_status["type"] == "watch":
+        activity_type = discord.ActivityType.watching
+    elif current_status["type"] == "listen":
+        activity_type = discord.ActivityType.listening
+
+    activity = discord.Activity(type=activity_type, name=current_status["name"])
+    await client.change_presence(status=discord_status, activity=activity)
+
+
 async def status_loop():
     await client.wait_until_ready()
-    
-    while not client.is_closed():
-        # Отримуємо поточний час (UTC +3 години для літнього Києва)
-        kyiv_time = datetime.now(timezone.utc) + timedelta(hours=3)
-        hour = kyiv_time.hour
-        
-        # 1. ВИЗНАЧАЄМО МЕРЕЖЕВИЙ СТАТУС (КОЛІР) ЗА ГРАФІКОМ
-        discord_status = discord.Status.online
-        
-        if 8 <= hour < 12:
-            discord_status = discord.Status.online      # 08:00 - 12:00: В мережі (Зелений)
-        elif 12 <= hour < 14:
-            discord_status = discord.Status.idle        # 12:00 - 14:00: Відійшов (Жовтий місяць)
-        elif 14 <= hour < 20:
-            discord_status = discord.Status.online      # 14:00 - 20:00: В мережі (Зелений)
-        else:
-            discord_status = discord.Status.dnd         # 20:00 - 08:00: Не турбувати (Червоний)
 
-        # 2. ВИЗНАЧАЄМО ТЕКСТОВИЙ СТАТУС
-        current_status = next(status_cycle)
-        activity_type = discord.ActivityType.playing
-        
-        if current_status["type"] == "watch":
-            activity_type = discord.ActivityType.watching
-        elif current_status["type"] == "listen":
-            activity_type = discord.ActivityType.listening
-            
-        activity = discord.Activity(type=activity_type, name=current_status["name"])
-        
-        # 3. ВІДПРАВЛЯЄМО В DISCORD ОДНОЧАСНО
+    while not client.is_closed():
         try:
-            await client.change_presence(status=discord_status, activity=activity)
+            await change_status()
         except Exception as e:
             print(f"Помилка оновлення статусу: {e}")
-            
-        # 4. РАХУЄМО ЧАС ДО НАСТУПНОЇ ГОДИНИ (напр. до 15:00:00)
-        # Оновлюємо змінну часу, щоб врахувати мілісекунди, витрачені на відправку запиту
-        now = datetime.now(timezone.utc) + timedelta(hours=3)
+
+        # Спимо до наступної повної години за реальним київським часом.
+        now = datetime.now(KYIV_TZ)
         next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-        
-        # Визначаємо точну кількість секунд до початку наступної години
-        sleep_seconds = (next_hour - now).total_seconds()
-        
-        # Бот засинає рівно до початку наступної години
+        sleep_seconds = max(1.0, (next_hour - now).total_seconds())
         await asyncio.sleep(sleep_seconds)
 
 # --- 🔍 ФУНКЦІЯ: Універсальний пошук повідомлень (DRY принцип) ---
@@ -4188,6 +4191,7 @@ async def on_message(message):
             desc += "**`!test [min]`** — Run test scenarios\n"
             desc += "**`!syncweek`** — Sync flights for current week\n"
             desc += "**`!updatedemand`** — Force GitHub demand update\n"
+            desc += "**`!topsync`** — Force Top/Bonus Sync\n"
             desc += "**`!delflight <ID>`** — Remove specific flight from stats\n"
             desc += "**`!ban <ID> [reason]`** — Ban user on server\n"
             desc += "**`!unban <ID>`** — Unban user on server\n"
@@ -4831,7 +4835,7 @@ def read_text_safe(path):
     except Exception:
         return None
 
-async def run_top_bonus_pipeline(session, ctx=None):
+async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
     async def fail_top_sync(reason):
         print(f"TOPSYNC_FAIL: {reason}")
         if ctx:
@@ -4884,6 +4888,16 @@ async def run_top_bonus_pipeline(session, ctx=None):
     ]
     for support_file in support_root_files:
         target = workdir / support_file
+
+        # Під час автоматичного 6-годинного циклу використовуємо СВІЖУ аналітику,
+        # яка щойно була згенерована, але ще не встигла потрапити в GitHub commit.
+        # Для ручного !topsync (charter_results=None) поведінка лишається стара:
+        # беремо останню версію з GitHub, а потім з live-site fallback.
+        if support_file == "newsky-charter-results.txt" and charter_results is not None:
+            target.write_text(charter_results, encoding="utf-8")
+            print("TOPSYNC_INFO: using fresh in-memory newsky-charter-results.txt from current sync cycle.")
+            continue
+
         await github_download_file(session, support_file, target, required=False)
         if not target.exists():
             live_url = f"https://kazuar.in.ua/{support_file}"
@@ -4918,8 +4932,16 @@ async def run_top_bonus_pipeline(session, ctx=None):
         env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
 
     try:
-        subprocess.run([node_bin, "scripts/update-top-pool.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
-        subprocess.run([node_bin, "scripts/update-guaranteed-bonuses.js"], cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180)
+        await asyncio.to_thread(
+            subprocess.run,
+            [node_bin, "scripts/update-top-pool.js"],
+            cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
+        )
+        await asyncio.to_thread(
+            subprocess.run,
+            [node_bin, "scripts/update-guaranteed-bonuses.js"],
+            cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
+        )
     except subprocess.CalledProcessError as e:
         detail = f"JS script failed with exit {e.returncode}. STDOUT: {(e.stdout or '')[-900:]} STDERR: {(e.stderr or '')[-900:]}"
         return await fail_top_sync(detail[:1900])
@@ -5044,6 +5066,7 @@ async def master_github_sync_task():
                 # 3. Аеропорти та Чартери (Раз на 6 годин: 0, 6, 12, 18)
                 if current_hour % 6 == 0:
                     print("🌍 Прийшов час оновлювати аеропорти (6-годинний цикл)!")
+                    charter_results = None
                     demand_content = await fetch_demand_data(session)
                     if demand_content:
                         files_to_push[GITHUB_FILE_PATH] = demand_content
@@ -5053,8 +5076,10 @@ async def master_github_sync_task():
                         if charter_results:
                             files_to_push["newsky-charter-results.txt"] = charter_results
 
-                    # Top-pool + guaranteed bonus awards (same 6-hour cycle)
-                    top_bonus_files = await run_top_bonus_pipeline(session)
+                    # Top-pool + guaranteed bonus awards (same 6-hour cycle).
+                    # Передаємо свіжий charter_results напряму, щоб Node не читав
+                    # попередню версію з GitHub до фінального batch-коміту.
+                    top_bonus_files = await run_top_bonus_pipeline(session, charter_results=charter_results)
                     if top_bonus_files:
                         files_to_push.update(top_bonus_files)
 
@@ -5106,10 +5131,18 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None):
 
     if ctx: await ctx.send("⚙️ **Step 2: Running analytics (Report ➔ Charters)...**")
 
-    # 3. Запускаємо обчислення
+    # 3. Запускаємо обчислення поза event loop, щоб Discord/рейси не зависали
     try:
-        subprocess.run([sys.executable, "newsky_report.py"], check=True, capture_output=True, text=True)
-        subprocess.run([sys.executable, "newsky_charter_with_tops_v4.py"], check=True, capture_output=True, text=True)
+        await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "newsky_report.py"],
+            check=True, capture_output=True, text=True
+        )
+        await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "newsky_charter_with_tops_v4.py"],
+            check=True, capture_output=True, text=True
+        )
     except subprocess.CalledProcessError as e:
         if ctx: await ctx.send(f"❌ **Script Error!**\n{e.stderr[-1000:]}")
         return None
