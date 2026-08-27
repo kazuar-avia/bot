@@ -250,6 +250,7 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
     if not livery_data: return None
     
     # 3. М'ясорубка: оновлюємо локації
+    target_found = any(str(ac.get("_id")) == str(target_ac_id) for ac in livery_data.get("liveries", []))
     for ac in livery_data.get("liveries", []):
         ac_id = str(ac.get("_id"))
         
@@ -264,7 +265,8 @@ async def get_updated_liveries_content(session, target_ac_id, actual_arr_icao):
             ac["lastflightlocationICAO"] = actual_arr_icao
             
     # 4. Оновлюємо час генерації
-    livery_data["generatedAtUtc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if target_found:
+        livery_data["generatedAtUtc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     
     # Повертаємо готовий текст для запису
     return json.dumps(livery_data, ensure_ascii=False, indent=2)
