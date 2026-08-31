@@ -58,6 +58,8 @@ STATUS_FILE = Path("/app/data/statuses.json")
 WEEKLY_STATS_FILE = Path("/app/data/weekly_stats.json")
 IGNORED_FILE = Path("/app/data/ignored.json")
 CHARTERS_FILE = Path("/app/data/charters.json")
+PROTECTED_CHANNEL_STATE_FILE = Path("/app/data/protected_channel.json")
+PROTECTED_CHANNEL_ID = 1532486889033170954
 CHECK_INTERVAL = 10
 BASE_URL = "https://newsky.app/api/airline-api"
 AIRPORTS_DB_URL = "https://raw.githubusercontent.com/mwgg/Airports/master/airports.json"
@@ -73,6 +75,7 @@ BANNED_WOW_MESSAGES = set()
 MONITORING_STARTED = False
 LAST_TRAFFIC_TIME = 0.0
 TAXIING_FLIGHTS = set()
+PROTECTED_CHANNEL_PROCESSING = set()
 last_sent_message = None
 
 # ---------- ДОПОМІЖНІ ФУНКЦІЇ ----------
@@ -500,6 +503,91 @@ def save_hidden_users(data):
     except: pass
 
 HIDDEN_USERS = load_hidden_users()
+
+# --- ⚠️ ЗАХИЩЕНИЙ КАНАЛ: СТАН І ПОПЕРЕДЖЕННЯ ---
+def load_protected_channel_state():
+    default_state = {"count": 0, "message_id": None}
+    if not PROTECTED_CHANNEL_STATE_FILE.exists():
+        return default_state
+    try:
+        data = json.loads(PROTECTED_CHANNEL_STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return default_state
+        return {
+            "count": int(data.get("count", 0)),
+            "message_id": data.get("message_id")
+        }
+    except Exception:
+        return default_state
+
+def save_protected_channel_state(state):
+    try:
+        PROTECTED_CHANNEL_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROTECTED_CHANNEL_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=4),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"⚠️ Не вдалося зберегти лічильник захищеного каналу: {e}")
+
+def get_protected_channel_warning_text(count):
+    return (
+        "⚠️ УВАГА\n\n"
+        "У цей канал заборонено надсилати будь-які повідомлення.\n\n"
+        "Якщо ви щось напишете сюди — бот автоматично заблокує вас на сервері.\n\n"
+        f"🔨 Заблоковано користувачів: {count}"
+    )
+
+async def ensure_protected_channel_warning(state=None):
+    channel = client.get_channel(PROTECTED_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(PROTECTED_CHANNEL_ID)
+        except Exception as e:
+            print(f"⚠️ Не знайдено захищений канал {PROTECTED_CHANNEL_ID}: {e}")
+            return None
+
+    if state is None:
+        state = load_protected_channel_state()
+
+    warning_text = get_protected_channel_warning_text(state.get("count", 0))
+    warning_message = None
+    saved_message_id = state.get("message_id")
+
+    if saved_message_id:
+        try:
+            warning_message = await channel.fetch_message(int(saved_message_id))
+            if warning_message.author.id != client.user.id:
+                warning_message = None
+        except Exception:
+            warning_message = None
+
+    # Якщо файл стану загубився/очистився, пробуємо знайти вже існуюче
+    # попередження бота, щоб не створювати дублікат.
+    if warning_message is None:
+        try:
+            async for old_message in channel.history(limit=50):
+                if (
+                    old_message.author.id == client.user.id
+                    and old_message.content.startswith("⚠️ УВАГА\n\nУ цей канал заборонено надсилати будь-які повідомлення.")
+                ):
+                    warning_message = old_message
+                    break
+        except Exception:
+            pass
+
+    try:
+        if warning_message is None:
+            warning_message = await channel.send(warning_text)
+        elif warning_message.content != warning_text:
+            await warning_message.edit(content=warning_text)
+
+        state["message_id"] = warning_message.id
+        save_protected_channel_state(state)
+        return warning_message
+    except Exception as e:
+        print(f"⚠️ Не вдалося створити/оновити попередження захищеного каналу: {e}")
+        return None
 
 # 🔥 БЛОК ФУНКЦІЙ ДЛЯ СТАТИСТИКИ 🔥
 def load_weekly_stats():
@@ -1032,6 +1120,7 @@ def get_landing_data(f, details_type):
 
 API_LOCK = None
 GITHUB_DB_LOCK = asyncio.Lock()
+PROTECTED_CHANNEL_LOCK = asyncio.Lock()
 KEY_USAGE_HISTORY = {key: [] for key in NEWSKY_API_KEYS}
 
 async def fetch_api(session, path, method="GET", body=None):
@@ -1704,11 +1793,64 @@ async def on_interaction(interaction):
 					
 # -----------------------------------------------------------------
 
+async def handle_protected_channel_message(message):
+    if message.channel.id != PROTECTED_CHANNEL_ID or message.guild is None:
+        return False
+
+    user_id = message.author.id
+
+    # Захист від кількох одночасних повідомлень одного користувача.
+    if user_id in PROTECTED_CHANNEL_PROCESSING:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return True
+
+    PROTECTED_CHANNEL_PROCESSING.add(user_id)
+    try:
+        # Причина бану навмисно не передається.
+        # 86400 секунд = видалення повідомлень користувача за останні 24 години.
+        await message.guild.ban(
+            message.author,
+            delete_message_seconds=86400
+        )
+
+        async with PROTECTED_CHANNEL_LOCK:
+            state = load_protected_channel_state()
+            state["count"] = int(state.get("count", 0)) + 1
+            save_protected_channel_state(state)
+            await ensure_protected_channel_warning(state)
+
+        print(f"🔨 Автоматично заблоковано користувача {user_id}. Усього: {state['count']}")
+
+    except discord.Forbidden:
+        print(f"❌ Не вдалося заблокувати користувача {user_id}: недостатньо прав або роль бота нижча.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"❌ Помилка автоматичного блокування користувача {user_id}: {e}")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    finally:
+        PROTECTED_CHANNEL_PROCESSING.discard(user_id)
+
+    return True
+
 @client.event
 async def on_message(message):
     global last_sent_message
     
     if message.author == client.user: return
+
+    # --- ⚠️ ЗАХИЩЕНИЙ КАНАЛ: БУДЬ-ЯКЕ ПОВІДОМЛЕННЯ = АВТОМАТИЧНИЙ БАН ---
+    if await handle_protected_channel_message(message):
+        return
+    # ------------------------------------------------------------------------
 
 	# --- 🥷 ФІЛЬТР: МИТТЄВЕ ВИДАЛЕННЯ ПОВІДОМЛЕНЬ ВІД ПРИХОВАНИХ ЮЗЕРІВ ---
     # Переводимо ID каналу в текст, бо JSON зберігає ключі як текст
@@ -5171,6 +5313,12 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None):
 @client.event
 async def on_ready():
     global MONITORING_STARTED
+
+    try:
+        await ensure_protected_channel_warning()
+    except Exception as e:
+        print(f"⚠️ Помилка ініціалізації захищеного каналу: {e}")
+
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
     
