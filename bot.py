@@ -538,7 +538,7 @@ def get_protected_channel_warning_text(count):
         f"🔨 Заблоковано користувачів: {count}"
     )
 
-async def move_protected_channel_to_top():
+async def move_protected_channel_to_third():
     channel = client.get_channel(PROTECTED_CHANNEL_ID)
     if channel is None:
         try:
@@ -548,13 +548,13 @@ async def move_protected_channel_to_top():
             return
 
     try:
-        # Виносимо канал з категорії, щоб він міг бути над усіма категоріями сервера.
+        # Виносимо канал з категорії, щоб його позиція рахувалася у загальному списку сервера.
         if getattr(channel, "category", None) is not None:
             await channel.edit(category=None, sync_permissions=False)
 
-        # Ставимо канал першим серед каналів без категорії — у Discord це верх списку.
-        await channel.move(beginning=True)
-        print(f"⬆️ Канал {PROTECTED_CHANNEL_ID} перенесено на самий верх списку серверу.")
+        # beginning=True + offset=2 = третє місце у списку (позиції: 0, 1, 2).
+        await channel.move(beginning=True, offset=2)
+        print(f"↕️ Канал {PROTECTED_CHANNEL_ID} перенесено на 3-тє місце у списку серверу.")
     except discord.Forbidden:
         print("❌ Не вдалося перенести захищений канал: боту потрібне право 'Manage Channels'.")
     except Exception as e:
@@ -5337,7 +5337,7 @@ async def on_ready():
     global MONITORING_STARTED
 
     try:
-        await move_protected_channel_to_top()
+        await move_protected_channel_to_third()
         await ensure_protected_channel_warning()
     except Exception as e:
         print(f"⚠️ Помилка ініціалізації захищеного каналу: {e}")
