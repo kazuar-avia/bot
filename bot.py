@@ -530,13 +530,29 @@ def save_protected_channel_state(state):
     except Exception as e:
         print(f"⚠️ Не вдалося зберегти лічильник захищеного каналу: {e}")
 
-def get_protected_channel_warning_text(count):
-    return (
-        "⚠️ УВАГА\n\n"
-        "У цей канал заборонено надсилати будь-які повідомлення.\n\n"
-        "Якщо ви щось напишете сюди — бот автоматично заблокує вас на сервері.\n\n"
-        f"🔨 Заблоковано користувачів: {count}"
+def get_protected_channel_warning_embed():
+    embed = discord.Embed(
+        title="⚠️ УВАГА",
+        description=(
+            "У цей канал заборонено надсилати будь-які повідомлення.\n\n"
+            "Якщо ви щось напишете сюди — бот автоматично заблокує вас на сервері."
+        ),
+        color=0xF0B232
     )
+    return embed
+
+
+def get_protected_channel_warning_view(count):
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(
+            label=f"Бани: {count}",
+            emoji="🔨",
+            style=discord.ButtonStyle.secondary,
+            disabled=True
+        )
+    )
+    return view
 
 async def move_protected_channel_to_third():
     channel = client.get_channel(PROTECTED_CHANNEL_ID)
@@ -572,7 +588,9 @@ async def ensure_protected_channel_warning(state=None):
     if state is None:
         state = load_protected_channel_state()
 
-    warning_text = get_protected_channel_warning_text(state.get("count", 0))
+    count = int(state.get("count", 0))
+    warning_embed = get_protected_channel_warning_embed()
+    warning_view = get_protected_channel_warning_view(count)
     warning_message = None
     saved_message_id = state.get("message_id")
 
@@ -585,14 +603,23 @@ async def ensure_protected_channel_warning(state=None):
             warning_message = None
 
     # Якщо файл стану загубився/очистився, пробуємо знайти вже існуюче
-    # попередження бота, щоб не створювати дублікат.
+    # попередження бота, щоб не створювати дублікат. Підтримуємо і старий
+    # текстовий вигляд, і новий вигляд через embed.
     if warning_message is None:
         try:
             async for old_message in channel.history(limit=50):
-                if (
+                old_plain_warning = (
                     old_message.author.id == client.user.id
-                    and old_message.content.startswith("⚠️ УВАГА\n\nУ цей канал заборонено надсилати будь-які повідомлення.")
-                ):
+                    and old_message.content.startswith(
+                        "⚠️ УВАГА\n\nУ цей канал заборонено надсилати будь-які повідомлення."
+                    )
+                )
+                old_embed_warning = (
+                    old_message.author.id == client.user.id
+                    and old_message.embeds
+                    and old_message.embeds[0].title == "⚠️ УВАГА"
+                )
+                if old_plain_warning or old_embed_warning:
                     warning_message = old_message
                     break
         except Exception:
@@ -600,9 +627,16 @@ async def ensure_protected_channel_warning(state=None):
 
     try:
         if warning_message is None:
-            warning_message = await channel.send(warning_text)
-        elif warning_message.content != warning_text:
-            await warning_message.edit(content=warning_text)
+            # Резервний варіант, якщо старе повідомлення реально видалене.
+            warning_message = await channel.send(embed=warning_embed, view=warning_view)
+        else:
+            # Редагуємо вже існуюче повідомлення: прибираємо старий plain-text,
+            # ставимо картку та оновлюємо кнопку-лічильник.
+            await warning_message.edit(
+                content=None,
+                embed=warning_embed,
+                view=warning_view
+            )
 
         state["message_id"] = warning_message.id
         save_protected_channel_state(state)
