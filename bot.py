@@ -549,7 +549,8 @@ def get_protected_channel_warning_view(count):
             label=f"Бани: {count}",
             emoji="🔨",
             style=discord.ButtonStyle.secondary,
-            disabled=True
+            custom_id="protected_channel_bans",
+            disabled=False
         )
     )
     return view
@@ -1543,6 +1544,26 @@ async def find_discord_message(target_id, command_message):
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.component:
         custom_id = interaction.data.get("custom_id", "")
+
+        # --- 🔨 КНОПКА ЛІЧИЛЬНИКА У ЗАХИЩЕНОМУ КАНАЛІ ---
+        if custom_id == "protected_channel_bans":
+            await interaction.response.send_message(
+                "⚠️ Будь обачнішим — якщо напишеш у цей канал, бот автоматично заблокує тебе.",
+                ephemeral=True
+            )
+
+            try:
+                owner = await client.fetch_user(ADMIN_IDS[0])
+                await owner.send(
+                    "🔨 **Натиснуто кнопку лічильника банів**\n"
+                    f"👤 **Користувач:** {interaction.user.display_name} (`{interaction.user.name}`)\n"
+                    f"🆔 **ID:** `{interaction.user.id}`\n"
+                    f"📍 **Канал:** <#{interaction.channel_id}>"
+                )
+            except Exception as e:
+                print(f"⚠️ Не вдалося надіслати сповіщення адміну про натискання кнопки: {e}")
+            return
+        # ----------------------------------------------------------
         
         # Перевіряємо єдину кнопку
         if custom_id.startswith("gstats_"):
