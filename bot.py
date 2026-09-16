@@ -77,6 +77,7 @@ MONITORING_STARTED = False
 LAST_TRAFFIC_TIME = 0.0
 TAXIING_FLIGHTS = set()
 PROTECTED_CHANNEL_PROCESSING = set()
+FORCE_PROCESSING_FLIGHTS = set()
 last_sent_message = None
 
 # ---------- ДОПОМІЖНІ ФУНКЦІЇ ----------
@@ -1617,6 +1618,43 @@ async def find_discord_message(target_id, command_message):
     return found_message
 # -----------------------------------------------------------------
 
+# --- ✅ ЄДИНА ОБРОБКА ЗАВЕРШЕНОГО РЕЙСУ (AUTO + MANUAL BYPASS) ---
+async def process_completed_flight(fid, f, channel, state, wait_for_github=False):
+    """
+    Єдина точка обробки завершеного рейсу.
+    Використовується і main_loop, і ручною кнопкою bypass, щоб логіка не дублювалася.
+    """
+    cs = f.get("flightNumber") or f.get("callsign") or "N/A"
+
+    reply_id = state.get(fid, {}).get("msg_id")
+    await send_flight_message(channel, "Completed", f, "result", reply_to_id=reply_id)
+
+    # Статистика тижня — та сама логіка, що була в main_loop.
+    week_tag = state.get(fid, {}).get("week") or get_iso_week()
+    update_weekly_stats(f, week_tag)
+
+    # GitHub — тиждень визначаємо за фактичним часом завершення рейсу.
+    arrival_time = f.get("arrTimeAct") or f.get("close")
+    target_week = get_iso_week(arrival_time)
+
+    clean_flight = format_flight_for_db(f)
+    pilot_data = f.get("pilot", {})
+    pilot_id = pilot_data.get("_id", "unknown")
+    pilot_name = pilot_data.get("fullname", "Unknown Pilot")
+    pilot_avatar = pilot_data.get("avatar", "default")
+
+    if wait_for_github:
+        # Для ручного bypass чекаємо завершення запису перед тим, як прибрати кнопку.
+        await save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
+    else:
+        # Автоматичний main_loop зберігає стару неблокуючу поведінку.
+        client.loop.create_task(
+            save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
+        )
+
+    state.setdefault(fid, {})["completed"] = True
+    return cs
+
 # --- 🌍 РАДАР КНОПОК СТАТИСТИКИ (GLOBAL STATS) ---
 @client.event
 async def on_interaction(interaction):
@@ -1640,6 +1678,90 @@ async def on_interaction(interaction):
                 )
             except Exception as e:
                 print(f"⚠️ Не вдалося надіслати сповіщення адміну про натискання кнопки: {e}")
+            return
+        # ----------------------------------------------------------
+
+        # --- 🔄 РУЧНИЙ BYPASS БАГОВАНОГО РЕЙСУ ---
+        if custom_id.startswith("force_process_"):
+            flight_id = custom_id[len("force_process_"):]
+
+            # Кнопка надсилається тільки адміну, але залишаємо явний захист по ID.
+            if interaction.user.id not in ADMIN_IDS:
+                await interaction.response.send_message("🚫 **Access Denied**", ephemeral=True)
+                return
+
+            # Захист від подвійного кліку, поки перша обробка ще триває.
+            if flight_id in FORCE_PROCESSING_FLIGHTS:
+                await interaction.response.send_message(
+                    "⏳ **Цей рейс уже примусово обробляється.**",
+                    ephemeral=True
+                )
+                return
+
+            FORCE_PROCESSING_FLIGHTS.add(flight_id)
+            await interaction.response.defer(ephemeral=True)
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    det = await fetch_api(session, f"/flight/{flight_id}")
+
+                # Якщо Newsky досі взагалі не віддає рейс — нічого не змінюємо,
+                # кнопку залишаємо для повторної спроби пізніше.
+                if not det or "flight" not in det:
+                    await interaction.followup.send(
+                        f"❌ **Не вдалося примусово обробити рейс `{flight_id}`:** "
+                        "Newsky досі не повертає дані про рейс. Кнопку залишено.",
+                        ephemeral=True
+                    )
+                    return
+
+                channel = client.get_channel(CHANNEL_ID)
+                if channel is None:
+                    try:
+                        channel = await client.fetch_channel(CHANNEL_ID)
+                    except Exception:
+                        channel = None
+
+                if channel is None:
+                    await interaction.followup.send(
+                        "❌ **Не знайдено основний канал для публікації рейсу.** Кнопку залишено.",
+                        ephemeral=True
+                    )
+                    return
+
+                f = det["flight"]
+                state = load_state()
+
+                # ВАЖЛИВО: safeguard тут навмисно НЕ запускається.
+                # Рейс проходить той самий Completed-конвеєр примусово.
+                cs = await process_completed_flight(
+                    flight_id, f, channel, state, wait_for_github=True
+                )
+                save_state(state)
+
+                # Успіх: фізично прибираємо кнопку з того самого ПП,
+                # щоб повторно натиснути її вже було неможливо.
+                try:
+                    await interaction.message.edit(view=None)
+                except Exception as e:
+                    print(f"⚠️ Рейс {flight_id} оброблено, але не вдалося прибрати bypass-кнопку: {e}")
+
+                await interaction.followup.send(
+                    f"✅ **Рейс `{cs}` (`{flight_id}`) примусово оброблено.** "
+                    "Звіт опубліковано, статистику оновлено, запис на GitHub виконано.",
+                    ephemeral=True
+                )
+                print(f"🔄 Force processed flight: {flight_id} ({cs})")
+
+            except Exception as e:
+                print(f"❌ Force process error for {flight_id}: {e}")
+                await interaction.followup.send(
+                    f"❌ **Помилка примусової обробки рейсу `{flight_id}`:** `{e}`\n"
+                    "Кнопку залишено, можна спробувати ще раз.",
+                    ephemeral=True
+                )
+            finally:
+                FORCE_PROCESSING_FLIGHTS.discard(flight_id)
             return
         # ----------------------------------------------------------
         
@@ -4741,12 +4863,24 @@ async def main_loop():
                                     # Відправляємо звіт тобі в ПП з причиною
                                     try:
                                         owner = await client.fetch_user(ADMIN_IDS[0])
+
+                                        bypass_view = discord.ui.View(timeout=None)
+                                        bypass_view.add_item(
+                                            discord.ui.Button(
+                                                label="Примусово обробити рейс",
+                                                emoji="🔄",
+                                                style=discord.ButtonStyle.primary,
+                                                custom_id=f"force_process_{fid}"
+                                            )
+                                        )
+
                                         await owner.send(
                                             f"🙈 **Проігноровано багований рейс!**\n"
                                             f"🔗 **ID:** `{fid}`\n"
                                             f"🌐 [Відкрити рейс на Newsky](https://newsky.app/flight/{fid})\n"
                                             f"🛑 **Причина ігнору:** {reason}\n"
-                                            f"*(Дані не оновилися навіть після трьох спроб по 3 секунди)*"
+                                            f"*(Дані не оновилися навіть після трьох спроб по 3 секунди)*",
+                                            view=bypass_view
                                         )
                                     except Exception as e:
                                         print(f"Помилка відправки в ПП: {e}")
@@ -4758,35 +4892,10 @@ async def main_loop():
                             cs = f.get("flightNumber") or f.get("callsign") or "N/A"
                             if cs == "N/A": continue
 
-                            reply_id = state.get(fid, {}).get("msg_id")
-                            await send_flight_message(channel, "Completed", f, "result", reply_to_id=reply_id)
-                            
-                            # 🔥 НОВЕ: Збір статистики після посадки 🔥
-                            week_tag = state.get(fid, {}).get("week") or get_iso_week()
-                            update_weekly_stats(f, week_tag)
-                            
-                            # ==========================================
-                            # 🚀 МАГІЯ GITHUB (ЗАПИС РЕЙСУ НА САЙТ)
-                            # ==========================================
-                            # Визначаємо тиждень за часом посадки (arrTimeAct), як ти і просив!
-                            arrival_time = f.get("arrTimeAct") or f.get("close")
-                            target_week = get_iso_week(arrival_time)
-                            
-                            clean_flight = format_flight_for_db(f)
-                            
-                            pilot_data = f.get("pilot", {})
-                            pilot_id = pilot_data.get("_id", "unknown")
-                            pilot_name = pilot_data.get("fullname", "Unknown Pilot")
-                            pilot_avatar = pilot_data.get("avatar", "default")
-                            
-                            # Відправляємо на GitHub як окреме фонове завдання, 
-                            # щоб бот не зависав і миттєво відправляв повідомлення в Discord
-                            client.loop.create_task(
-                                save_flight_to_github(clean_flight, pilot_id, pilot_name, pilot_avatar, target_week)
+                            # Єдина функція обробки — її ж викликає ручний bypass.
+                            cs = await process_completed_flight(
+                                fid, f, channel, state, wait_for_github=False
                             )
-                            # ==========================================
-                            
-                            state.setdefault(fid, {})["completed"] = True
                             print(f"✅ Report Sent: {cs}")
                         
                         elif raw_f.get("deleted"):
