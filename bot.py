@@ -1314,6 +1314,51 @@ async def fetch_api(session, path, method="GET", body=None):
         print(f"⚠️ API Error ({path}): {e}")
         return None
 
+# --- ✈️ ФОРМАТ АВІАКОМПАНІЇ / РЕЄСТРАЦІЇ ДЛЯ СПОВІЩЕНЬ ---
+def format_aircraft_operator_line(f):
+    """
+    Формує другий рядок під типом літака у flight-сповіщеннях.
+
+    Правила для aircraft.name:
+    1) name починається з Dry Lease -> показуємо тільки Dry Lease.
+    2) немає роздільника " l " -> вважаємо Dry Lease.
+    3) є " l " -> перша частина є назвою а/к, реєстрацію шукаємо як UR-....
+    4) виняток формату "UR-85535 l TU-154 ..." -> показуємо тільки реєстрацію.
+    """
+    aircraft_name = str(f.get("aircraft", {}).get("name") or "").strip()
+
+    # Явний Dry Lease має пріоритет, навіть якщо всередині назви є " l ".
+    if aircraft_name.lower().startswith("dry lease"):
+        return "🛩️ **Dry Lease**"
+
+    # Роздільник у назвах флоту: пробіли + літера l + пробіли.
+    separator_pattern = r"\s+[lL]\s+"
+    if not re.search(separator_pattern, aircraft_name):
+        return "🛩️ **Dry Lease**"
+
+    parts = re.split(separator_pattern, aircraft_name)
+    first_part = parts[0].strip() if parts else ""
+
+    # Реєстрація може бути в будь-якій частині рядка.
+    reg_match = re.search(r"\bUR-[A-Z0-9-]+\b", aircraft_name, re.IGNORECASE)
+    registration = reg_match.group(0).upper() if reg_match else ""
+
+    # Окремий формат, де реєстрація стоїть першою: "UR-85535 l TU-154 l XP12".
+    if re.fullmatch(r"UR-[A-Z0-9-]+", first_part, re.IGNORECASE):
+        return f"🪪 **{first_part.upper()}**"
+
+    airline_name = first_part
+
+    if airline_name and registration:
+        return f"🏢 **{airline_name}**  |  🪪 **{registration}**"
+    if airline_name:
+        return f"🏢 **{airline_name}**"
+    if registration:
+        return f"🪪 **{registration}**"
+
+    # Абсолютний fallback, щоб у сповіщенні не з'являвся порожній рядок.
+    return "🛩️ **Dry Lease**"
+
 # ---------- MESSAGE GENERATOR ----------
 async def send_flight_message(channel, status, f, details_type="ongoing", reply_to_id=None):
     fid = f.get("_id") or f.get("id") or "test_id"
@@ -1356,6 +1401,7 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     # ---------------------------------------------
     
     ac = f.get("aircraft", {}).get("airframe", {}).get("name", "A/C")
+    aircraft_operator_line = format_aircraft_operator_line(f)
     pilot = f.get("pilot", {}).get("fullname", "Pilot")
     
     raw_pax = 0
@@ -1398,7 +1444,8 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
 
         desc = (
             f"{dep_str}{arrow}{arr_str}\n\n"
-            f"✈️ **{ac}**\n\n"
+            f"✈️ **{ac}**\n"
+            f"{aircraft_operator_line}\n\n"
             f"{get_timing(delay)}\n" 
             f"{taxi_str}"            
             f"👨‍✈️ **{pilot}**\n\n"
@@ -1460,7 +1507,8 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
 
         desc = (
             f"{dep_str}{arrow}{arr_str}\n\n"
-            f"✈️ **{ac}**\n\n"
+            f"✈️ **{ac}**\n"
+            f"{aircraft_operator_line}\n\n"
             f"{time_info_str}" 
             f"👨‍✈️ **{pilot}**\n\n"
             f"🌐 **{net.upper()}**\n\n"
