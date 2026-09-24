@@ -2228,6 +2228,52 @@ async def on_message(message):
                     pass
     
 
+    # --- COMMAND: !bonussync (manual guaranteed bonuses only) ---
+    if message.content.strip().lower() == "!bonussync":
+        if not is_admin:
+            return await message.channel.send("🚫 **Access Denied**")
+
+        status_msg = await message.channel.send(
+            "⏳ **BONUSSYNC:** запускаю ручне оновлення guaranteed bonuses..."
+        )
+
+        try:
+            async with GITHUB_DB_LOCK:
+                async with aiohttp.ClientSession() as session:
+                    files_to_push = await run_guaranteed_bonus_only(session)
+
+                    if files_to_push is None:
+                        return await status_msg.edit(
+                            content="❌ **BONUSSYNC:** оновлення завершилось з помилкою. Перевір Railway logs."
+                        )
+
+                    if not files_to_push:
+                        return await status_msg.edit(
+                            content="✅ **BONUSSYNC:** завершено. Змін у `guaranteed-bonuses.json` немає."
+                        )
+
+                    success = await push_to_github_batch(
+                        session,
+                        files_to_push,
+                        "Manual guaranteed bonus sync",
+                    )
+
+                    if success:
+                        await status_msg.edit(
+                            content="✅ **BONUSSYNC:** `COMPANY/guaranteed-bonuses.json` успішно оновлено на GitHub."
+                        )
+                    else:
+                        await status_msg.edit(
+                            content="❌ **BONUSSYNC:** зміни згенеровано, але push у GitHub не вдався. Перевір Railway logs."
+                        )
+
+        except Exception as e:
+            print(f"BONUSSYNC_ERROR: {e}")
+            await status_msg.edit(
+                content=f"❌ **BONUSSYNC exception:** `{str(e)[:1500]}`"
+            )
+        return
+
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
     if message.content.strip().lower() == "!topsync":
         if not is_admin:
