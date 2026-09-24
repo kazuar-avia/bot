@@ -5419,6 +5419,123 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             files_to_push[rel_path] = content
     return files_to_push
 
+async def run_guaranteed_bonus_only(session):
+    """Run only update-guaranteed-bonuses.js and return changed files."""
+    if not GITHUB_TOKEN:
+        print("❌ GUARANTEED_BONUS_FAIL: missing GITHUB_TOKEN in Railway Variables")
+        return None
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        print("❌ GUARANTEED_BONUS_FAIL: Node.js not found in Railway image")
+        return None
+
+    workdir = Path("/tmp/ucaa-guaranteed-bonus-sync")
+    if workdir.exists():
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    (workdir / "scripts").mkdir(parents=True, exist_ok=True)
+    (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
+    (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
+
+    required_files = [
+        "ADcoordinates.json",
+        "scripts/update-guaranteed-bonuses.js",
+        "COMPANY/livery-matching.json",
+        "COMPANY/ucaa-livery-database.json",
+        "COMPANY/guaranteed-bonuses.json",
+        "FLIGHTS/manifest.json",
+        "aircraft-difficulty-coefficients.js",
+        "pilot-pay-policy.js",
+    ]
+    optional_files = [
+        "COMPANY/top-pool-current.json",
+        "FLIGHTS/archive.json",
+        "newsky-charter-results.txt",
+    ]
+
+    for remote_path in required_files:
+        ok = await github_download_file(
+            session,
+            remote_path,
+            workdir / remote_path,
+            required=True,
+        )
+        if not ok:
+            print(f"❌ GUARANTEED_BONUS_FAIL: cannot download required file: {remote_path}")
+            return None
+
+    for remote_path in optional_files:
+        await github_download_file(
+            session,
+            remote_path,
+            workdir / remote_path,
+            required=False,
+        )
+
+    # Скрипту потрібні тижневі FLIGHTS та архіви TOP-POOLS.
+    flights_count = await github_download_json_directory(
+        session,
+        "FLIGHTS",
+        workdir / "FLIGHTS",
+    )
+    top_archives_count = await github_download_json_directory(
+        session,
+        "COMPANY/TOP-POOLS",
+        workdir / "COMPANY" / "TOP-POOLS",
+    )
+    print(
+        f"🎁 Guaranteed Bonus workspace ready: "
+        f"FLIGHTS={flights_count}, TOP-POOLS={top_archives_count}"
+    )
+
+    bonus_path = "COMPANY/guaranteed-bonuses.json"
+    before = read_text_safe(workdir / bonus_path)
+
+    env = os.environ.copy()
+    if NEWSKY_API_KEY and not env.get("NEWSKY_AIRLINE_TOKEN"):
+        env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
+
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [node_bin, "scripts/update-guaranteed-bonuses.js"],
+            cwd=str(workdir),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.stdout:
+            print(f"🎁 Guaranteed Bonus JS: {result.stdout[-1200:]}")
+    except subprocess.CalledProcessError as e:
+        print(
+            f"❌ GUARANTEED_BONUS_FAIL: JS exit {e.returncode}. "
+            f"STDOUT: {(e.stdout or '')[-900:]} "
+            f"STDERR: {(e.stderr or '')[-900:]}"
+        )
+        return None
+    except subprocess.TimeoutExpired as e:
+        print(f"❌ GUARANTEED_BONUS_FAIL: JS timeout: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ GUARANTEED_BONUS_FAIL: {e}")
+        return None
+
+    after = read_text_safe(workdir / bonus_path)
+    if after is None:
+        print("❌ GUARANTEED_BONUS_FAIL: guaranteed-bonuses.json missing after Node run")
+        return None
+
+    if before == after:
+        print("✅ Guaranteed Bonus: змін немає.")
+        return {}
+
+    print("✅ Guaranteed Bonus: guaranteed-bonuses.json змінився.")
+    return {bonus_path: after}
+
+
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     if not files_dict or not GITHUB_TOKEN: return False
     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
@@ -5488,6 +5605,81 @@ async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
 
     print("❌ Всі 3 спроби відправити дані на GitHub вичерпано. Рейс не записано.")
     return False
+
+# ОКРЕМИЙ ДИСПЕТЧЕР GUARANTEED BONUSES КОЖНІ 10 ХВИЛИН
+@tasks.loop()
+async def guaranteed_bonus_scheduler_task():
+    # Наступна точна межа: :00, :10, :20, :30, :40 або :50 UTC.
+    now = datetime.now(timezone.utc)
+    next_minute = ((now.minute // 10) + 1) * 10
+
+    if next_minute >= 60:
+        target = (now + timedelta(hours=1)).replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    else:
+        target = now.replace(
+            minute=next_minute,
+            second=0,
+            microsecond=0,
+        )
+
+    sleep_seconds = max(0, (target - now).total_seconds())
+    print(
+        f"🎁 Guaranteed Bonus Scheduler: чекаю до "
+        f"{target.strftime('%H:%M')} UTC."
+    )
+    await asyncio.sleep(sleep_seconds)
+
+    run_time = datetime.now(timezone.utc)
+
+    # О 00:00, 06:00, 12:00 та 18:00 UTC окремий запуск НЕ робимо.
+    # У ці моменти update-guaranteed-bonuses.js уже запускається всередині
+    # run_top_bonus_pipeline() головного 6-годинного циклу.
+    if run_time.minute == 0 and run_time.hour % 6 == 0:
+        print(
+            f"⏭️ Guaranteed Bonus Scheduler: "
+            f"{run_time.strftime('%H:%M')} UTC пропущено — "
+            "цей запуск виконає run_top_bonus_pipeline()."
+        )
+        return
+
+    print(
+        f"🎁 Guaranteed Bonus Scheduler: запуск "
+        f"{run_time.strftime('%H:%M:%S')} UTC."
+    )
+
+    try:
+        # Один GitHub lock не дасть цьому апдейту конфліктувати
+        # з іншими записами бота у kazuar-avia.github.io.
+        async with GITHUB_DB_LOCK:
+            async with aiohttp.ClientSession() as session:
+                files_to_push = await run_guaranteed_bonus_only(session)
+
+                if files_to_push is None:
+                    print("❌ Guaranteed Bonus Scheduler: updater завершився з помилкою.")
+                    return
+
+                if not files_to_push:
+                    print("✅ Guaranteed Bonus Scheduler: commit не потрібен.")
+                    return
+
+                success = await push_to_github_batch(
+                    session,
+                    files_to_push,
+                    "Update guaranteed bonuses",
+                )
+
+                if success:
+                    print("✅ Guaranteed Bonus Scheduler: зміни записані у GitHub.")
+                else:
+                    print("❌ Guaranteed Bonus Scheduler: GitHub push failed.")
+
+    except Exception as e:
+        print(f"❌ Guaranteed Bonus Scheduler error: {e}")
+
 
 # ГОЛОВНИЙ ДИСПЕТЧЕР
 @tasks.loop()
@@ -5636,10 +5828,17 @@ async def on_ready():
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
     
-    # Запускаємо єдиний розумний диспетчер замість трьох старих!
+    # Головний погодинний / 6-годинний диспетчер.
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
         print("🤖 Master GitHub Sync Dispatcher started!")
+
+    # Guaranteed bonuses: :00/:10/:20/:30/:40/:50.
+    # На 00:00/06:00/12:00/18:00 UTC scheduler пропускає окремий запуск,
+    # бо update-guaranteed-bonuses.js уже входить у run_top_bonus_pipeline().
+    if not guaranteed_bonus_scheduler_task.is_running():
+        guaranteed_bonus_scheduler_task.start()
+        print("🎁 Guaranteed Bonus Scheduler started!")
 
     print(f"✅ Bot online: {client.user}")
     print("🚀 MONITORING STARTED")
