@@ -5496,11 +5496,37 @@ async def run_guaranteed_bonus_only(session):
         print("❌ GUARANTEED_BONUS_FAIL: guaranteed-bonuses.json missing after Node run")
         return None
 
-    if before == after:
-        print("✅ Guaranteed Bonus: змін немає.")
+    # Для окремого 10-хвилинного updater'а зміна лише updatedAt не є
+    # реальною зміною даних і не повинна створювати GitHub commit.
+    # Будь-яка інша зміна (новий/видалений рейс, amount, state, status,
+    # route, pilot/aircraft, pie-поля тощо) як і раніше призводить до commit.
+    def without_updated_at(value):
+        if isinstance(value, dict):
+            return {
+                key: without_updated_at(child)
+                for key, child in value.items()
+                if key != "updatedAt"
+            }
+        if isinstance(value, list):
+            return [without_updated_at(item) for item in value]
+        return value
+
+    try:
+        before_data = json.loads(before) if before is not None else None
+        after_data = json.loads(after)
+        substantive_change = (
+            without_updated_at(before_data) != without_updated_at(after_data)
+        )
+    except Exception as e:
+        # Якщо JSON раптом не парситься, не приховуємо потенційно важливу зміну.
+        print(f"⚠️ Guaranteed Bonus compare fallback: {e}")
+        substantive_change = before != after
+
+    if not substantive_change:
+        print("✅ Guaranteed Bonus: змінився лише updatedAt — commit не потрібен.")
         return {}
 
-    print("✅ Guaranteed Bonus: guaranteed-bonuses.json змінився.")
+    print("✅ Guaranteed Bonus: є суттєва зміна — файл буде закомічено.")
     return {bonus_path: after}
 
 
