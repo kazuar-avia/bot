@@ -59,6 +59,7 @@ WEEKLY_STATS_FILE = Path("/app/data/weekly_stats.json")
 IGNORED_FILE = Path("/app/data/ignored.json")
 CHARTERS_FILE = Path("/app/data/charters.json")
 PROTECTED_CHANNEL_STATE_FILE = Path("/app/data/protected_channel.json")
+SERVER_SETUP_STATE_FILE = Path("/app/data/server_setup.json")
 PROTECTED_CHANNEL_ID = 1532486889033170954
 CHECK_INTERVAL = 10
 BASE_URL = "https://newsky.app/api/airline-api"
@@ -504,6 +505,83 @@ def save_hidden_users(data):
     except: pass
 
 HIDDEN_USERS = load_hidden_users()
+
+# --- 🛡️ ОДНОРАЗОВЕ НАЛАШТУВАННЯ СЕРВЕРА ---
+def load_server_setup_state():
+    if not SERVER_SETUP_STATE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(SERVER_SETUP_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_server_setup_state(state):
+    try:
+        SERVER_SETUP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SERVER_SETUP_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=4),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"⚠️ Не вдалося зберегти одноразові налаштування сервера: {e}")
+
+async def disable_everyone_mentions_once():
+    state = load_server_setup_state()
+    if state.get("everyone_mentions_disabled_once") is True:
+        return
+
+    channel = client.get_channel(PROTECTED_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(PROTECTED_CHANNEL_ID)
+        except Exception as e:
+            print(f"⚠️ Не вдалося знайти сервер для вимкнення @everyone: {e}")
+            return
+
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        print("⚠️ Не вдалося визначити сервер для вимкнення @everyone.")
+        return
+
+    try:
+        changed_roles = 0
+        skipped_roles = []
+        bot_member = guild.me
+        bot_top_role = bot_member.top_role if bot_member else None
+
+        # Прибираємо право Mention @everyone/@here з усіх ролей, які бот може редагувати.
+        for role in guild.roles:
+            if not role.permissions.mention_everyone:
+                continue
+
+            # Інтеграційні/керовані ролі Discord редагувати не дозволяє.
+            if role.managed:
+                skipped_roles.append(role.name)
+                continue
+
+            # @everyone можна редагувати окремо; для інших ролей діє ієрархія ролей.
+            if role != guild.default_role and bot_top_role is not None and role >= bot_top_role:
+                skipped_roles.append(role.name)
+                continue
+
+            permissions = role.permissions
+            permissions.update(mention_everyone=False)
+            await role.edit(permissions=permissions)
+            changed_roles += 1
+
+        print(f"🔇 Право згадувати @everyone/@here вимкнено. Змінено ролей: {changed_roles}.")
+        if skipped_roles:
+            print("⚠️ Не вдалося змінити ролі вище бота/керовані Discord: " + ", ".join(skipped_roles))
+
+        # Після успішного одноразового проходу більше автоматично це не чіпаємо.
+        state["everyone_mentions_disabled_once"] = True
+        save_server_setup_state(state)
+
+    except discord.Forbidden:
+        print("❌ Не вдалося вимкнути @everyone: боту потрібне право 'Manage Roles' і роль вище за ролі, які треба змінити.")
+    except Exception as e:
+        print(f"⚠️ Помилка під час одноразового вимкнення @everyone: {e}")
 
 # --- ⚠️ ЗАХИЩЕНИЙ КАНАЛ: СТАН І ПОПЕРЕДЖЕННЯ ---
 def load_protected_channel_state():
@@ -2149,52 +2227,6 @@ async def on_message(message):
                 except:
                     pass
     
-
-    # --- COMMAND: !bonussync (manual guaranteed bonuses only) ---
-    if message.content.strip().lower() == "!bonussync":
-        if not is_admin:
-            return await message.channel.send("🚫 **Access Denied**")
-
-        status_msg = await message.channel.send(
-            "⏳ **BONUSSYNC:** запускаю ручне оновлення guaranteed bonuses..."
-        )
-
-        try:
-            async with GITHUB_DB_LOCK:
-                async with aiohttp.ClientSession() as session:
-                    files_to_push = await run_guaranteed_bonus_only(session)
-
-                    if files_to_push is None:
-                        return await status_msg.edit(
-                            content="❌ **BONUSSYNC:** оновлення завершилось з помилкою. Перевір Railway logs."
-                        )
-
-                    if not files_to_push:
-                        return await status_msg.edit(
-                            content="✅ **BONUSSYNC:** завершено. Змін у `guaranteed-bonuses.json` немає."
-                        )
-
-                    success = await push_to_github_batch(
-                        session,
-                        files_to_push,
-                        "Manual guaranteed bonus sync",
-                    )
-
-                    if success:
-                        await status_msg.edit(
-                            content="✅ **BONUSSYNC:** `COMPANY/guaranteed-bonuses.json` успішно оновлено на GitHub."
-                        )
-                    else:
-                        await status_msg.edit(
-                            content="❌ **BONUSSYNC:** зміни згенеровано, але push у GitHub не вдався. Перевір Railway logs."
-                        )
-
-        except Exception as e:
-            print(f"BONUSSYNC_ERROR: {e}")
-            await status_msg.edit(
-                content=f"❌ **BONUSSYNC exception:** `{str(e)[:1500]}`"
-            )
-        return
 
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
     if message.content.strip().lower() == "!topsync":
@@ -5387,149 +5419,6 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             files_to_push[rel_path] = content
     return files_to_push
 
-async def run_guaranteed_bonus_only(session):
-    """Run only update-guaranteed-bonuses.js and return changed files."""
-    if not GITHUB_TOKEN:
-        print("❌ GUARANTEED_BONUS_FAIL: missing GITHUB_TOKEN in Railway Variables")
-        return None
-
-    node_bin = shutil.which("node")
-    if not node_bin:
-        print("❌ GUARANTEED_BONUS_FAIL: Node.js not found in Railway image")
-        return None
-
-    workdir = Path("/tmp/ucaa-guaranteed-bonus-sync")
-    if workdir.exists():
-        shutil.rmtree(workdir, ignore_errors=True)
-
-    (workdir / "scripts").mkdir(parents=True, exist_ok=True)
-    (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
-    (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
-
-    required_files = [
-        "ADcoordinates.json",
-        "scripts/update-guaranteed-bonuses.js",
-        "COMPANY/livery-matching.json",
-        "COMPANY/ucaa-livery-database.json",
-        "COMPANY/guaranteed-bonuses.json",
-        "FLIGHTS/manifest.json",
-        "aircraft-difficulty-coefficients.js",
-        "pilot-pay-policy.js",
-    ]
-    optional_files = [
-        "COMPANY/top-pool-current.json",
-        "FLIGHTS/archive.json",
-        "newsky-charter-results.txt",
-    ]
-
-    for remote_path in required_files:
-        ok = await github_download_file(
-            session,
-            remote_path,
-            workdir / remote_path,
-            required=True,
-        )
-        if not ok:
-            print(f"❌ GUARANTEED_BONUS_FAIL: cannot download required file: {remote_path}")
-            return None
-
-    for remote_path in optional_files:
-        await github_download_file(
-            session,
-            remote_path,
-            workdir / remote_path,
-            required=False,
-        )
-
-    # Скрипту потрібні тижневі FLIGHTS та архіви TOP-POOLS.
-    flights_count = await github_download_json_directory(
-        session,
-        "FLIGHTS",
-        workdir / "FLIGHTS",
-    )
-    top_archives_count = await github_download_json_directory(
-        session,
-        "COMPANY/TOP-POOLS",
-        workdir / "COMPANY" / "TOP-POOLS",
-    )
-    print(
-        f"🎁 Guaranteed Bonus workspace ready: "
-        f"FLIGHTS={flights_count}, TOP-POOLS={top_archives_count}"
-    )
-
-    bonus_path = "COMPANY/guaranteed-bonuses.json"
-    before = read_text_safe(workdir / bonus_path)
-
-    env = os.environ.copy()
-    if NEWSKY_API_KEY and not env.get("NEWSKY_AIRLINE_TOKEN"):
-        env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
-
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [node_bin, "scripts/update-guaranteed-bonuses.js"],
-            cwd=str(workdir),
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.stdout:
-            print(f"🎁 Guaranteed Bonus JS: {result.stdout[-1200:]}")
-    except subprocess.CalledProcessError as e:
-        print(
-            f"❌ GUARANTEED_BONUS_FAIL: JS exit {e.returncode}. "
-            f"STDOUT: {(e.stdout or '')[-900:]} "
-            f"STDERR: {(e.stderr or '')[-900:]}"
-        )
-        return None
-    except subprocess.TimeoutExpired as e:
-        print(f"❌ GUARANTEED_BONUS_FAIL: JS timeout: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ GUARANTEED_BONUS_FAIL: {e}")
-        return None
-
-    after = read_text_safe(workdir / bonus_path)
-    if after is None:
-        print("❌ GUARANTEED_BONUS_FAIL: guaranteed-bonuses.json missing after Node run")
-        return None
-
-    # Для окремого 10-хвилинного updater'а зміна лише updatedAt не є
-    # реальною зміною даних і не повинна створювати GitHub commit.
-    # Будь-яка інша зміна (новий/видалений рейс, amount, state, status,
-    # route, pilot/aircraft, pie-поля тощо) як і раніше призводить до commit.
-    def without_updated_at(value):
-        if isinstance(value, dict):
-            return {
-                key: without_updated_at(child)
-                for key, child in value.items()
-                if key != "updatedAt"
-            }
-        if isinstance(value, list):
-            return [without_updated_at(item) for item in value]
-        return value
-
-    try:
-        before_data = json.loads(before) if before is not None else None
-        after_data = json.loads(after)
-        substantive_change = (
-            without_updated_at(before_data) != without_updated_at(after_data)
-        )
-    except Exception as e:
-        # Якщо JSON раптом не парситься, не приховуємо потенційно важливу зміну.
-        print(f"⚠️ Guaranteed Bonus compare fallback: {e}")
-        substantive_change = before != after
-
-    if not substantive_change:
-        print("✅ Guaranteed Bonus: змінився лише updatedAt — commit не потрібен.")
-        return {}
-
-    print("✅ Guaranteed Bonus: є суттєва зміна — файл буде закомічено.")
-    return {bonus_path: after}
-
-
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     if not files_dict or not GITHUB_TOKEN: return False
     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
@@ -5599,81 +5488,6 @@ async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
 
     print("❌ Всі 3 спроби відправити дані на GitHub вичерпано. Рейс не записано.")
     return False
-
-# ОКРЕМИЙ ДИСПЕТЧЕР GUARANTEED BONUSES КОЖНІ 10 ХВИЛИН
-@tasks.loop()
-async def guaranteed_bonus_scheduler_task():
-    # Наступна точна межа: :00, :10, :20, :30, :40 або :50 UTC.
-    now = datetime.now(timezone.utc)
-    next_minute = ((now.minute // 10) + 1) * 10
-
-    if next_minute >= 60:
-        target = (now + timedelta(hours=1)).replace(
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-    else:
-        target = now.replace(
-            minute=next_minute,
-            second=0,
-            microsecond=0,
-        )
-
-    sleep_seconds = max(0, (target - now).total_seconds())
-    print(
-        f"🎁 Guaranteed Bonus Scheduler: чекаю до "
-        f"{target.strftime('%H:%M')} UTC."
-    )
-    await asyncio.sleep(sleep_seconds)
-
-    run_time = datetime.now(timezone.utc)
-
-    # О 00:00, 06:00, 12:00 та 18:00 UTC окремий запуск НЕ робимо.
-    # У ці моменти update-guaranteed-bonuses.js уже запускається всередині
-    # run_top_bonus_pipeline() головного 6-годинного циклу.
-    if run_time.minute == 0 and run_time.hour % 6 == 0:
-        print(
-            f"⏭️ Guaranteed Bonus Scheduler: "
-            f"{run_time.strftime('%H:%M')} UTC пропущено — "
-            "цей запуск виконає run_top_bonus_pipeline()."
-        )
-        return
-
-    print(
-        f"🎁 Guaranteed Bonus Scheduler: запуск "
-        f"{run_time.strftime('%H:%M:%S')} UTC."
-    )
-
-    try:
-        # Один GitHub lock не дасть цьому апдейту конфліктувати
-        # з іншими записами бота у kazuar-avia.github.io.
-        async with GITHUB_DB_LOCK:
-            async with aiohttp.ClientSession() as session:
-                files_to_push = await run_guaranteed_bonus_only(session)
-
-                if files_to_push is None:
-                    print("❌ Guaranteed Bonus Scheduler: updater завершився з помилкою.")
-                    return
-
-                if not files_to_push:
-                    print("✅ Guaranteed Bonus Scheduler: commit не потрібен.")
-                    return
-
-                success = await push_to_github_batch(
-                    session,
-                    files_to_push,
-                    "Update guaranteed bonuses",
-                )
-
-                if success:
-                    print("✅ Guaranteed Bonus Scheduler: зміни записані у GitHub.")
-                else:
-                    print("❌ Guaranteed Bonus Scheduler: GitHub push failed.")
-
-    except Exception as e:
-        print(f"❌ Guaranteed Bonus Scheduler error: {e}")
-
 
 # ГОЛОВНИЙ ДИСПЕТЧЕР
 @tasks.loop()
@@ -5813,6 +5627,7 @@ async def on_ready():
     global MONITORING_STARTED
 
     try:
+        await disable_everyone_mentions_once()
         await move_protected_channel_to_third()
         await ensure_protected_channel_warning()
     except Exception as e:
@@ -5821,17 +5636,10 @@ async def on_ready():
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
     
-    # Головний погодинний / 6-годинний диспетчер.
+    # Запускаємо єдиний розумний диспетчер замість трьох старих!
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
         print("🤖 Master GitHub Sync Dispatcher started!")
-
-    # Guaranteed bonuses: :00/:10/:20/:30/:40/:50.
-    # На 00:00/06:00/12:00/18:00 UTC scheduler пропускає окремий запуск,
-    # бо update-guaranteed-bonuses.js уже входить у run_top_bonus_pipeline().
-    if not guaranteed_bonus_scheduler_task.is_running():
-        guaranteed_bonus_scheduler_task.start()
-        print("🎁 Guaranteed Bonus Scheduler started!")
 
     print(f"✅ Bot online: {client.user}")
     print("🚀 MONITORING STARTED")
