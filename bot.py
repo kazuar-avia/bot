@@ -59,7 +59,6 @@ WEEKLY_STATS_FILE = Path("/app/data/weekly_stats.json")
 IGNORED_FILE = Path("/app/data/ignored.json")
 CHARTERS_FILE = Path("/app/data/charters.json")
 PROTECTED_CHANNEL_STATE_FILE = Path("/app/data/protected_channel.json")
-SERVER_SETUP_STATE_FILE = Path("/app/data/server_setup.json")
 PROTECTED_CHANNEL_ID = 1532486889033170954
 CHECK_INTERVAL = 10
 BASE_URL = "https://newsky.app/api/airline-api"
@@ -505,83 +504,6 @@ def save_hidden_users(data):
     except: pass
 
 HIDDEN_USERS = load_hidden_users()
-
-# --- 🛡️ ОДНОРАЗОВЕ НАЛАШТУВАННЯ СЕРВЕРА ---
-def load_server_setup_state():
-    if not SERVER_SETUP_STATE_FILE.exists():
-        return {}
-    try:
-        data = json.loads(SERVER_SETUP_STATE_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-def save_server_setup_state(state):
-    try:
-        SERVER_SETUP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SERVER_SETUP_STATE_FILE.write_text(
-            json.dumps(state, ensure_ascii=False, indent=4),
-            encoding="utf-8"
-        )
-    except Exception as e:
-        print(f"⚠️ Не вдалося зберегти одноразові налаштування сервера: {e}")
-
-async def disable_everyone_mentions_once():
-    state = load_server_setup_state()
-    if state.get("everyone_mentions_disabled_once") is True:
-        return
-
-    channel = client.get_channel(PROTECTED_CHANNEL_ID)
-    if channel is None:
-        try:
-            channel = await client.fetch_channel(PROTECTED_CHANNEL_ID)
-        except Exception as e:
-            print(f"⚠️ Не вдалося знайти сервер для вимкнення @everyone: {e}")
-            return
-
-    guild = getattr(channel, "guild", None)
-    if guild is None:
-        print("⚠️ Не вдалося визначити сервер для вимкнення @everyone.")
-        return
-
-    try:
-        changed_roles = 0
-        skipped_roles = []
-        bot_member = guild.me
-        bot_top_role = bot_member.top_role if bot_member else None
-
-        # Прибираємо право Mention @everyone/@here з усіх ролей, які бот може редагувати.
-        for role in guild.roles:
-            if not role.permissions.mention_everyone:
-                continue
-
-            # Інтеграційні/керовані ролі Discord редагувати не дозволяє.
-            if role.managed:
-                skipped_roles.append(role.name)
-                continue
-
-            # @everyone можна редагувати окремо; для інших ролей діє ієрархія ролей.
-            if role != guild.default_role and bot_top_role is not None and role >= bot_top_role:
-                skipped_roles.append(role.name)
-                continue
-
-            permissions = role.permissions
-            permissions.update(mention_everyone=False)
-            await role.edit(permissions=permissions)
-            changed_roles += 1
-
-        print(f"🔇 Право згадувати @everyone/@here вимкнено. Змінено ролей: {changed_roles}.")
-        if skipped_roles:
-            print("⚠️ Не вдалося змінити ролі вище бота/керовані Discord: " + ", ".join(skipped_roles))
-
-        # Після успішного одноразового проходу більше автоматично це не чіпаємо.
-        state["everyone_mentions_disabled_once"] = True
-        save_server_setup_state(state)
-
-    except discord.Forbidden:
-        print("❌ Не вдалося вимкнути @everyone: боту потрібне право 'Manage Roles' і роль вище за ролі, які треба змінити.")
-    except Exception as e:
-        print(f"⚠️ Помилка під час одноразового вимкнення @everyone: {e}")
 
 # --- ⚠️ ЗАХИЩЕНИЙ КАНАЛ: СТАН І ПОПЕРЕДЖЕННЯ ---
 def load_protected_channel_state():
@@ -5627,7 +5549,6 @@ async def on_ready():
     global MONITORING_STARTED
 
     try:
-        await disable_everyone_mentions_once()
         await move_protected_channel_to_third()
         await ensure_protected_channel_warning()
     except Exception as e:
