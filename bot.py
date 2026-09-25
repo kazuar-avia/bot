@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiohttp import web
 from discord.ext import tasks
+from railway_monitor import RailwayCostMonitor, RailwayCostView
 
 # ---------- НАЛАШТУВАННЯ ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -68,6 +69,11 @@ logging.basicConfig(level=logging.INFO)
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+# Railway cost/resource monitor. Network hooks are installed before client.run()
+# so Discord/NewSky/GitHub outbound traffic can be attributed from startup.
+railway_monitor = RailwayCostMonitor()
+railway_monitor.install_network_hooks()
 
 AIRPORTS_DB = {}
 HIDDEN_USERS = {}
@@ -2149,6 +2155,21 @@ async def on_message(message):
                 except:
                     pass
     
+
+    # --- 🚂 COMMAND: !railway (ONE PAGED COST/RESOURCE PANEL) ---
+    if message.content.strip().lower() == "!railway":
+        if not is_admin:
+            return await message.channel.send("🚫 **Access Denied**")
+
+        try:
+            view = RailwayCostView(railway_monitor, message.author.id, page=0)
+            embed = await railway_monitor.build_embed(0, refresh_official=True)
+            panel_message = await message.channel.send(embed=embed, view=view)
+            view.message = panel_message
+        except Exception as e:
+            print(f"RAILWAY_PANEL_ERROR: {e}")
+            await message.channel.send(f"❌ **Railway monitor error:** `{str(e)[:1500]}`")
+        return
 
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
     if message.content.strip().lower() == "!topsync":
@@ -5556,6 +5577,9 @@ async def on_ready():
 
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
+
+    # Start persistent Railway resource/cost sampling (safe against duplicate on_ready calls).
+    railway_monitor.start()
     
     # Запускаємо єдиний розумний диспетчер замість трьох старих!
     if not master_github_sync_task.is_running():
