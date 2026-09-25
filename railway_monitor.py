@@ -427,7 +427,7 @@ class RailwayCostMonitor:
         out = {"billing": None, "live": None, "agent": None, "error": None}
 
         if not project_id or not service_id:
-            out["error"] = "Railway system IDs are unavailable."
+            out["error"] = "Системні ID Railway недоступні."
             self._official_cache = out
             self._official_cache_at = now
             return out
@@ -435,7 +435,7 @@ class RailwayCostMonitor:
         token = api_token or project_token
         use_project = not api_token and bool(project_token)
         if not token:
-            out["error"] = "Set RAILWAY_API_TOKEN for exact billing, or RAILWAY_TOKEN for live metrics."
+            out["error"] = "Додай RAILWAY_API_TOKEN для точного білінгу або RAILWAY_TOKEN для поточних метрик."
             self._official_cache = out
             self._official_cache_at = now
             return out
@@ -470,7 +470,7 @@ class RailwayCostMonitor:
                 if api_token:
                     wid = await self._workspace(session, api_token, project_id)
                     if not wid:
-                        out["billing_error"] = "Workspace not resolved. Set RAILWAY_WORKSPACE_ID."
+                        out["billing_error"] = "Не вдалося визначити workspace. Додай RAILWAY_WORKSPACE_ID."
                     else:
                         qc = "query C($w:String!){workspace(workspaceId:$w){id name customer{currentUsage billingPeriod{start end}}}}"
                         cd = await self._gql(session, qc, {"w": wid}, api_token)
@@ -530,7 +530,7 @@ class RailwayCostMonitor:
 
     @staticmethod
     def pages():
-        return ["Overview", "CPU & RAM", "Network", "Sources", "Hosts", "Storage", "Railway", "History"]
+        return ["Огляд", "CPU і RAM", "Мережа", "Джерела", "Хости", "Сховище", "Railway", "Історія"]
 
     async def snapshot(self, force=False):
         await self.sample_once()
@@ -547,29 +547,29 @@ class RailwayCostMonitor:
         names = self.pages()
         page %= len(names)
         e = discord.Embed(
-            title=f"Railway Cost Monitor - {names[page]}",
+            title=f"Монітор витрат Railway — {names[page]}",
             color=0x7A5AF8,
             timestamp=datetime.now(timezone.utc),
         )
-        e.set_footer(text="Official Railway billing is authoritative. Local detailed meter starts when this monitor is deployed.")
+        e.set_footer(text="Офіційні дані Railway мають пріоритет. Локальний детальний облік ведеться від моменту розгортання цього монітора.")
 
         if page == 0:
             billed = (official.get("billing") or {}).get("costs")
             shown = billed or local
-            mode = "Railway official" if billed else "local meter"
+            mode = "офіційні дані Railway" if billed else "локальний лічильник"
             e.description = (
                 f"Current service usage cost: **{self.money(shown.get('total'))}** ({mode})\n"
                 f"Meter since: {str(state.get('created_at',''))[:19]} UTC\n"
                 f"Restarts tracked: {state.get('restarts',0)}\n\n"
-                "Use the buttons below to switch pages."
+                "Для перемикання сторінок використовуй кнопки нижче."
             )
             e.add_field(name="CPU", value=f"Now {latest['cpu']:.5f} vCPU\nLocal {self.money(local['cpu'])}", inline=True)
             e.add_field(name="RAM", value=f"Now {latest['memory']/1048576:.1f} MB\nLocal {self.money(local['ram'])}", inline=True)
-            e.add_field(name="Egress", value=f"{self.fmt_bytes(total.get('network_tx_bytes'))}\nLocal {self.money(local['egress'])}", inline=True)
+            e.add_field(name="Вихідний трафік", value=f"{self.fmt_bytes(total.get('network_tx_bytes'))}\nLocal {self.money(local['egress'])}", inline=True)
             e.add_field(name="Volume", value=f"{self.fmt_bytes(latest['volume'])}\nLocal {self.money(local['volume'])}", inline=True)
             if billed:
                 e.add_field(
-                    name="Railway billed resources",
+                    name="Ресурси за даними Railway",
                     value=(
                         f"CPU {self.money(billed['cpu'])} | RAM {self.money(billed['ram'])}\n"
                         f"Egress {self.money(billed['egress'])} | Volume {self.money(billed['volume'])} | Backup {self.money(billed['backup'])}"
@@ -577,51 +577,51 @@ class RailwayCostMonitor:
                     inline=False,
                 )
             elif official.get("error") or official.get("billing_error"):
-                e.add_field(name="Official billing", value=str(official.get("error") or official.get("billing_error"))[:1024], inline=False)
+                e.add_field(name="Офіційний білінг", value=str(official.get("error") or official.get("billing_error"))[:1024], inline=False)
 
         elif page == 1:
             cpu_min = float(total.get("cpu_seconds", 0)) / 60.0
             ram_min = float(total.get("memory_gb_minutes", 0))
-            e.description = "Container-wide cgroup counters include bot.py and every child Python/Node process."
-            e.add_field(name="CPU now", value=f"{latest['cpu']:.6f} vCPU", inline=True)
-            e.add_field(name="CPU accumulated", value=f"{cpu_min:.3f} vCPU-min\n{self.money(local['cpu'])}", inline=True)
-            e.add_field(name="RAM now", value=f"{latest['memory']/1048576:.2f} MB", inline=True)
-            e.add_field(name="RAM accumulated", value=f"{ram_min:.3f} GB-min\n{self.money(local['ram'])}", inline=True)
+            e.description = "Лічильники cgroup охоплюють увесь контейнер: bot.py та всі дочірні процеси Python/Node."
+            e.add_field(name="CPU зараз", value=f"{latest['cpu']:.6f} vCPU", inline=True)
+            e.add_field(name="CPU накопичено", value=f"{cpu_min:.3f} vCPU-min\n{self.money(local['cpu'])}", inline=True)
+            e.add_field(name="RAM зараз", value=f"{latest['memory']/1048576:.2f} MB", inline=True)
+            e.add_field(name="RAM накопичено", value=f"{ram_min:.3f} GB-min\n{self.money(local['ram'])}", inline=True)
             live = official.get("live") or {}
             lines = []
             if live.get("CPU_USAGE"):
                 x = live["CPU_USAGE"]
-                lines.append(f"CPU 2h: current {x['current']:.5f}, avg {x['avg']:.5f}, peak {x['peak']:.5f}")
+                lines.append(f"CPU за 2 год: зараз {x['current']:.5f}, середнє {x['avg']:.5f}, пік {x['peak']:.5f}")
             if live.get("MEMORY_USAGE_GB"):
                 x = live["MEMORY_USAGE_GB"]
-                lines.append(f"RAM 2h: current {x['current']*1024:.1f} MB, avg {x['avg']*1024:.1f} MB, peak {x['peak']*1024:.1f} MB")
+                lines.append(f"RAM за 2 год: зараз {x['current']*1024:.1f} MB, середнє {x['avg']*1024:.1f} MB, пік {x['peak']*1024:.1f} MB")
             if lines:
-                e.add_field(name="Railway live metrics", value="\n".join(lines), inline=False)
+                e.add_field(name="Поточні метрики Railway", value="\n".join(lines), inline=False)
 
         elif page == 2:
             tx = int(total.get("network_tx_bytes", 0))
             rx = int(total.get("network_rx_bytes", 0))
-            e.description = "Kernel interface totals cover every process and protocol in the container. Railway charges outbound TX; RX is shown for diagnosis."
-            e.add_field(name="TX / Egress", value=f"{self.fmt_bytes(tx)}\n{self.money(local['egress'])}", inline=True)
-            e.add_field(name="RX / Ingress", value=f"{self.fmt_bytes(rx)}\nNot egress-billed", inline=True)
-            e.add_field(name="Current rate", value=f"TX {self.fmt_bytes(latest['tx_bps'])}/s\nRX {self.fmt_bytes(latest['rx_bps'])}/s", inline=True)
+            e.description = "Мережеві лічильники ядра охоплюють усі процеси й протоколи контейнера. Railway тарифікує вихідний TX; RX показується для діагностики."
+            e.add_field(name="TX / Вихідний трафік", value=f"{self.fmt_bytes(tx)}\n{self.money(local['egress'])}", inline=True)
+            e.add_field(name="RX / Вхідний трафік", value=f"{self.fmt_bytes(rx)}\nNot egress-billed", inline=True)
+            e.add_field(name="Поточна швидкість", value=f"TX {self.fmt_bytes(latest['tx_bps'])}/s\nRX {self.fmt_bytes(latest['rx_bps'])}/s", inline=True)
             b = official.get("billing")
             if b:
                 m = b.get("measurements") or {}
-                e.add_field(name="Railway billing-period egress", value=f"{m.get('NETWORK_TX_GB',0):.6f} GB -> {self.money(b['costs']['egress'])}", inline=False)
+                e.add_field(name="Egress за поточний білінговий період Railway", value=f"{m.get('NETWORK_TX_GB',0):.6f} GB -> {self.money(b['costs']['egress'])}", inline=False)
 
         elif page == 3:
             attrs = state.get("network", {})
             known = sum(int(v.get("bytes", 0)) for v in attrs.values())
             transport = max(0, int(total.get("network_tx_bytes", 0)) - known)
-            e.description = "Application attribution is detailed, while total TX above is the kernel truth. Unclassified includes TLS/TCP/IP overhead and subprocess traffic."
+            e.description = "Розподіл за джерелами показує прикладний трафік, а загальний TX вище — фактичний лічильник ядра. Нерозподілене включає TLS/TCP/IP overhead і трафік дочірніх процесів."
             for name, item in sorted(attrs.items(), key=lambda kv: int(kv[1].get("bytes",0)), reverse=True)[:8]:
                 e.add_field(
                     name=name,
                     value=f"{self.fmt_bytes(item.get('bytes'))} | {item.get('requests',0)} HTTP | {item.get('ws_frames',0)} WS frames",
                     inline=False,
                 )
-            e.add_field(name="Transport / unclassified", value=self.fmt_bytes(transport), inline=False)
+            e.add_field(name="Транспорт / нерозподілене", value=self.fmt_bytes(transport), inline=False)
 
         elif page == 4:
             rows = []
@@ -631,54 +631,54 @@ class RailwayCostMonitor:
             rows.sort(reverse=True)
             e.description = "Top outbound hosts seen through aiohttp and Discord's aiohttp WebSocket."
             if rows:
-                text = "\n".join(f"{source}: {host} - {self.fmt_bytes(size)}, {reqs} req" for size, source, host, reqs in rows[:15])
+                text = "\n".join(f"{source}: {host} — {self.fmt_bytes(size)}, {reqs} запитів" for size, source, host, reqs in rows[:15])
             else:
-                text = "No attributed traffic yet."
-            e.add_field(name="Hosts", value=text[:1024], inline=False)
+                text = "Поки немає атрибутованого трафіку."
+            e.add_field(name="Хости", value=text[:1024], inline=False)
 
         elif page == 5:
             vol_min = float(total.get("volume_gb_minutes", 0))
-            e.description = "Local volume uses allocated filesystem blocks. Railway API values are shown when available; backups cannot be seen from inside the container."
-            e.add_field(name="Volume now", value=self.fmt_bytes(latest["volume"]), inline=True)
-            e.add_field(name="Local accumulated", value=f"{vol_min:.4f} GB-min\n{self.money(local['volume'])}", inline=True)
+            e.description = "Локальний Volume рахується за реально зайнятими блоками файлової системи. Дані Railway API показуються, якщо доступні; backups неможливо точно побачити лише зсередини контейнера."
+            e.add_field(name="Volume зараз", value=self.fmt_bytes(latest["volume"]), inline=True)
+            e.add_field(name="Локально накопичено", value=f"{vol_min:.4f} GB-min\n{self.money(local['volume'])}", inline=True)
             b = official.get("billing")
             if b:
                 m = b.get("measurements") or {}
                 c = b.get("costs") or {}
-                e.add_field(name="Railway Volume", value=f"{m.get('DISK_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('volume'))}", inline=True)
-                e.add_field(name="Railway Backups", value=f"{m.get('BACKUP_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('backup'))}", inline=True)
+                e.add_field(name="Volume за даними Railway", value=f"{m.get('DISK_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('volume'))}", inline=True)
+                e.add_field(name="Backups за даними Railway", value=f"{m.get('BACKUP_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('backup'))}", inline=True)
 
         elif page == 6:
             b = official.get("billing")
-            e.description = "Billing-period data from Railway Public API is the source of truth used to reconcile the local meter."
+            e.description = "Дані за білінговий період із Railway Public API — це джерело істини для звірки локального лічильника."
             if b:
                 m = b.get("measurements") or {}
                 c = b.get("costs") or {}
                 p = b.get("period") or {}
-                e.add_field(name="Billing period", value=f"{p.get('start','?')}\n-> {p.get('end','?')}", inline=False)
+                e.add_field(name="Білінговий період", value=f"{p.get('start','?')}\n-> {p.get('end','?')}", inline=False)
                 e.add_field(name="CPU", value=f"{m.get('CPU_USAGE',0):.6f}\n{self.money(c.get('cpu'))}", inline=True)
                 e.add_field(name="RAM", value=f"{m.get('MEMORY_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('ram'))}", inline=True)
-                e.add_field(name="Egress", value=f"{m.get('NETWORK_TX_GB',0):.6f} GB\n{self.money(c.get('egress'))}", inline=True)
+                e.add_field(name="Вихідний трафік", value=f"{m.get('NETWORK_TX_GB',0):.6f} GB\n{self.money(c.get('egress'))}", inline=True)
                 e.add_field(name="Volume", value=f"{m.get('DISK_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('volume'))}", inline=True)
                 e.add_field(name="Backup", value=f"{m.get('BACKUP_USAGE_GB',0):.6f} GB-min\n{self.money(c.get('backup'))}", inline=True)
-                e.add_field(name="Service metered total", value=f"**{self.money(c.get('total'))}**", inline=False)
+                e.add_field(name="Разом за ресурси сервісу", value=f"**{self.money(c.get('total'))}**", inline=False)
                 if b.get("workspace_current_usage") is not None:
-                    e.add_field(name="Workspace currentUsage", value=str(b.get("workspace_current_usage")), inline=False)
+                    e.add_field(name="Поточне використання workspace", value=str(b.get("workspace_current_usage")), inline=False)
             else:
-                msg = official.get("billing_error") or official.get("error") or "No official billing data."
-                e.add_field(name="Official billing unavailable", value=str(msg)[:1024], inline=False)
+                msg = official.get("billing_error") or official.get("error") or "Немає офіційних даних білінгу."
+                e.add_field(name="Офіційний білінг недоступний", value=str(msg)[:1024], inline=False)
                 e.add_field(
-                    name="For exact billing",
-                    value="Add an account/workspace token as RAILWAY_API_TOKEN. If workspace auto-detection fails, also add RAILWAY_WORKSPACE_ID.",
+                    name="Для точного білінгу",
+                    value="Додай account/workspace token у змінну RAILWAY_API_TOKEN. Якщо workspace не визначиться автоматично, також додай RAILWAY_WORKSPACE_ID.",
                     inline=False,
                 )
             a = official.get("agent")
             if a:
                 used = int(a.get("totalUsedCents") or 0) / 100.0
                 hard = int(a.get("hardLimitCents") or 0) / 100.0
-                e.add_field(name="Railway Agent - workspace, separate", value=f"Used USD {used:.2f} | hard limit USD {hard:.2f}", inline=False)
+                e.add_field(name="Railway Agent — окремо для workspace", value=f"Використано: USD {used:.2f} | жорсткий ліміт: USD {hard:.2f}", inline=False)
             e.add_field(
-                name="Not attributed to this bot",
+                name="Не віднесено безпосередньо до цього бота",
                 value="Plan minimum/subscription, purchased domains, object Buckets and other workspace-level products are separate from this service's runtime metered resources.",
                 inline=False,
             )
@@ -691,14 +691,14 @@ class RailwayCostMonitor:
                 lines.append(
                     f"{day} | {self.money(c['total'])} | TX {self.fmt_bytes(u.get('network_tx_bytes'))} | CPU {float(u.get('cpu_seconds',0))/60:.2f} vCPU-min"
                 )
-            e.description = "Persistent local history stored in /app/data/railway_cost_meter.json."
-            e.add_field(name="Recent days", value="\n".join(lines)[:1024] if lines else "No samples yet.", inline=False)
+            e.description = "Локальна історія зберігається у /app/data/railway_cost_meter.json."
+            e.add_field(name="Останні дні", value="\n".join(lines)[:1024] if lines else "Поки немає зразків.", inline=False)
             e.add_field(
-                name="Accuracy",
+                name="Точність",
                 value=(
                     "Exact billing: Railway billing-period API.\n"
                     "Container totals: cgroup CPU/RAM + kernel TX/RX.\n"
-                    "Destination split: estimated application bytes; transport overhead remains unclassified."
+                    "Розподіл за напрямками: оцінка прикладних байтів; транспортний overhead залишається нерозподіленим."
                 ),
                 inline=False,
             )
@@ -714,9 +714,9 @@ class RailwayCostView(discord.ui.View):
         self.message = None
 
         self.prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary)
-        self.label = discord.ui.Button(label="1/8 - Overview", style=discord.ButtonStyle.secondary, disabled=True)
+        self.label = discord.ui.Button(label="1/8 — Огляд", style=discord.ButtonStyle.secondary, disabled=True)
         self.next = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary)
-        self.refresh = discord.ui.Button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.primary)
+        self.refresh = discord.ui.Button(label="Оновити", emoji="🔄", style=discord.ButtonStyle.primary)
         self.prev.callback = self._prev
         self.next.callback = self._next
         self.refresh.callback = self._refresh
@@ -726,11 +726,11 @@ class RailwayCostView(discord.ui.View):
 
     def _sync(self):
         names = self.monitor.pages()
-        self.label.label = f"{self.page+1}/{len(names)} - {names[self.page]}"
+        self.label.label = f"{self.page+1}/{len(names)} — {names[self.page]}"
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Цю панель відкрив інший адміністратор. Запусти !railway сам.", ephemeral=True)
+            await interaction.response.send_message("Цю панель відкрив інший адміністратор. Запусти `!railway` сам.", ephemeral=True)
             return False
         return True
 
