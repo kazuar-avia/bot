@@ -18,7 +18,6 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiohttp import web
 from discord.ext import tasks
-from railway_monitor import RailwayCostMonitor, RailwayCostView
 
 # ---------- НАЛАШТУВАННЯ ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -68,12 +67,677 @@ AIRPORTS_DB_URL = "https://raw.githubusercontent.com/mwgg/Airports/master/airpor
 logging.basicConfig(level=logging.INFO)
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
 
-# Railway cost/resource monitor. Network hooks are installed before client.run()
-# so Discord/NewSky/GitHub outbound traffic can be attributed from startup.
-railway_monitor = RailwayCostMonitor()
-railway_monitor.install_network_hooks()
+# ============================================================================
+# 🚂 ЛОКАЛЬНИЙ ЛІЧИЛЬНИК РЕСУРСІВ RAILWAY
+# Усе знаходиться в bot.py. Жодного Railway API: бот рахує ресурси сам.
+# ============================================================================
+class LocalRailwayMeter:
+    CPU_USD_PER_VCPU_MONTH = 20.0
+    RAM_USD_PER_GB_MONTH = 10.0
+    EGRESS_USD_PER_GB = 0.05
+    VOLUME_USD_PER_GB_MONTH = 0.15
+    MONTH_MINUTES = 43200.0
+
+    _installed = False
+    _active = None
+    _orig_request = None
+    _orig_ws_str = None
+    _orig_ws_bytes = None
+
+    def __init__(self, interval=2):
+        self.interval = max(1, int(interval))
+        self.state_file = Path("/app/data/railway_usage.json")
+        self.volume_path = Path("/app/data")
+        self._lock = asyncio.Lock()
+        self._task = None
+        self._last = None
+        self._last_save = 0.0
+        self.latest = {
+            "cpu_vcpu": 0.0,
+            "ram_bytes": 0,
+            "tx_bps": 0.0,
+            "rx_bps": 0.0,
+            "volume_bytes": 0,
+        }
+        self.state = self._load_state()
+        LocalRailwayMeter._active = self
+
+    @staticmethod
+    def _empty_usage():
+        return {
+            "cpu_seconds": 0.0,
+            "ram_gb_minutes": 0.0,
+            "tx_bytes": 0,
+            "rx_bytes": 0,
+            "volume_gb_minutes": 0.0,
+        }
+
+    def _new_state(self):
+        return {
+            "version": 2,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "totals": self._empty_usage(),
+            "cpu_consumers": {},
+            "ram_consumers": {},
+            "network_sources": {},
+            "daily": {},
+        }
+
+    def _load_state(self):
+        fresh = self._new_state()
+        try:
+            if self.state_file.exists():
+                old = json.loads(self.state_file.read_text(encoding="utf-8"))
+                if isinstance(old, dict) and old.get("version") == 2:
+                    fresh.update(old)
+                    fresh.setdefault("totals", self._empty_usage())
+                    fresh.setdefault("cpu_consumers", {})
+                    fresh.setdefault("ram_consumers", {})
+                    fresh.setdefault("network_sources", {})
+                    fresh.setdefault("daily", {})
+        except Exception as e:
+            print(f"RESOURCE_METER load error: {e}")
+        return fresh
+
+    def _save_state(self):
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_file.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(self.state, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            tmp.replace(self.state_file)
+        except Exception as e:
+            print(f"RESOURCE_METER save error: {e}")
+
+    @staticmethod
+    def _read_cgroup_cpu():
+        try:
+            for line in Path("/sys/fs/cgroup/cpu.stat").read_text().splitlines():
+                if line.startswith("usage_usec "):
+                    return int(line.split()[1]) / 1_000_000.0
+        except Exception:
+            pass
+        for path in (
+            "/sys/fs/cgroup/cpuacct/cpuacct.usage",
+            "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage",
+        ):
+            try:
+                return int(Path(path).read_text().strip()) / 1_000_000_000.0
+            except Exception:
+                pass
+        return time.process_time()
+
+    @staticmethod
+    def _read_cgroup_ram():
+        for path in (
+            "/sys/fs/cgroup/memory.current",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ):
+            try:
+                return max(0, int(Path(path).read_text().strip()))
+            except Exception:
+                pass
+        return 0
+
+    @staticmethod
+    def _read_network():
+        rx = 0
+        tx = 0
+        try:
+            for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
+                if ":" not in line:
+                    continue
+                iface, data = line.split(":", 1)
+                if iface.strip() == "lo":
+                    continue
+                fields = data.split()
+                if len(fields) >= 9:
+                    rx += int(fields[0])
+                    tx += int(fields[8])
+        except Exception:
+            pass
+        return rx, tx
+
+    def _read_volume(self):
+        total = 0
+        try:
+            for root, _, files in os.walk(self.volume_path):
+                for name in files:
+                    path = os.path.join(root, name)
+                    try:
+                        st = os.stat(path, follow_symlinks=False)
+                        blocks = int(getattr(st, "st_blocks", 0)) * 512
+                        total += blocks if blocks else int(st.st_size)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    @staticmethod
+    def _process_label(pid, cmdline):
+        if pid == os.getpid():
+            return "bot.py"
+        text_cmd = " ".join(cmdline).strip()
+        lower = text_cmd.lower()
+
+        if "node" in lower:
+            for part in cmdline:
+                if part.lower().endswith(".js"):
+                    return "Node: " + os.path.basename(part)
+            return "Node"
+
+        if "python" in lower:
+            for part in cmdline:
+                if part.lower().endswith(".py"):
+                    return "Python: " + os.path.basename(part)
+            return "Python"
+
+        if cmdline:
+            return os.path.basename(cmdline[0])[:60]
+        return "Інший процес"
+
+    @staticmethod
+    def _processes():
+        result = {}
+        ppid_map = {}
+        raw = {}
+        ticks = float(os.sysconf(os.sysconf_names["SC_CLK_TCK"]))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+
+        try:
+            pids = [int(x) for x in os.listdir("/proc") if x.isdigit()]
+        except Exception:
+            return result
+
+        for pid in pids:
+            try:
+                stat_text = Path(f"/proc/{pid}/stat").read_text()
+                end = stat_text.rfind(")")
+                rest = stat_text[end + 2:].split()
+                ppid = int(rest[1])
+                cpu_seconds = (int(rest[11]) + int(rest[12])) / ticks
+
+                try:
+                    raw_cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+                    cmdline = [x.decode("utf-8", "replace") for x in raw_cmd.split(b"\0") if x]
+                except Exception:
+                    cmdline = []
+
+                try:
+                    statm = Path(f"/proc/{pid}/statm").read_text().split()
+                    rss = int(statm[1]) * page_size
+                except Exception:
+                    rss = 0
+
+                raw[pid] = {
+                    "ppid": ppid,
+                    "cpu": cpu_seconds,
+                    "rss": rss,
+                    "cmdline": cmdline,
+                }
+                ppid_map[pid] = ppid
+            except Exception:
+                pass
+
+        mine = {os.getpid()}
+        changed = True
+        while changed:
+            changed = False
+            for pid, ppid in ppid_map.items():
+                if pid not in mine and ppid in mine:
+                    mine.add(pid)
+                    changed = True
+
+        for pid in mine:
+            item = raw.get(pid)
+            if not item:
+                continue
+            result[pid] = {
+                "cpu": item["cpu"],
+                "rss": item["rss"],
+                "label": LocalRailwayMeter._process_label(pid, item["cmdline"]),
+            }
+        return result
+
+    def _reading(self):
+        rx, tx = self._read_network()
+        return {
+            "mono": time.monotonic(),
+            "wall": datetime.now(timezone.utc),
+            "cpu": self._read_cgroup_cpu(),
+            "ram": self._read_cgroup_ram(),
+            "rx": rx,
+            "tx": tx,
+            "volume": self._read_volume(),
+            "processes": self._processes(),
+        }
+
+    @staticmethod
+    def _add(mapping, key, value):
+        mapping[key] = float(mapping.get(key, 0.0)) + float(value)
+
+    def _apply(self, prev, cur):
+        dt = cur["mono"] - prev["mono"]
+        if dt <= 0 or dt > 120:
+            return
+
+        cpu_delta = max(0.0, cur["cpu"] - prev["cpu"])
+        tx_delta = max(0, cur["tx"] - prev["tx"])
+        rx_delta = max(0, cur["rx"] - prev["rx"])
+        ram_avg = max(0.0, (prev["ram"] + cur["ram"]) / 2.0)
+        volume_avg = max(0.0, (prev["volume"] + cur["volume"]) / 2.0)
+
+        ram_gb_min = ram_avg / 1_000_000_000.0 * dt / 60.0
+        volume_gb_min = volume_avg / 1_000_000_000.0 * dt / 60.0
+
+        for bucket in (
+            self.state["totals"],
+            self.state["daily"].setdefault(cur["wall"].strftime("%Y-%m-%d"), self._empty_usage()),
+        ):
+            bucket["cpu_seconds"] = float(bucket.get("cpu_seconds", 0.0)) + cpu_delta
+            bucket["ram_gb_minutes"] = float(bucket.get("ram_gb_minutes", 0.0)) + ram_gb_min
+            bucket["tx_bytes"] = int(bucket.get("tx_bytes", 0)) + tx_delta
+            bucket["rx_bytes"] = int(bucket.get("rx_bytes", 0)) + rx_delta
+            bucket["volume_gb_minutes"] = float(bucket.get("volume_gb_minutes", 0.0)) + volume_gb_min
+
+        # CPU: розподіляємо точний cgroup CPU між процесами.
+        proc_cpu = defaultdict(float)
+        prev_proc = prev.get("processes", {})
+        for pid, item in cur.get("processes", {}).items():
+            old = prev_proc.get(pid)
+            if old:
+                delta = max(0.0, item["cpu"] - old["cpu"])
+            else:
+                delta = max(0.0, item["cpu"])
+            proc_cpu[item["label"]] += delta
+
+        observed_cpu = sum(proc_cpu.values())
+        if observed_cpu > cpu_delta and observed_cpu > 0:
+            scale = cpu_delta / observed_cpu
+            for label in list(proc_cpu):
+                proc_cpu[label] *= scale
+            observed_cpu = cpu_delta
+
+        for label, value in proc_cpu.items():
+            self._add(self.state["cpu_consumers"], label, value)
+
+        missing_cpu = max(0.0, cpu_delta - observed_cpu)
+        if missing_cpu > 0:
+            self._add(self.state["cpu_consumers"], "Системне / короткі процеси", missing_cpu)
+
+        # RAM: розподіляємо точну cgroup RAM пропорційно RSS процесів.
+        rss_by_label = defaultdict(float)
+        for item in cur.get("processes", {}).values():
+            rss_by_label[item["label"]] += max(0, item["rss"])
+        rss_sum = sum(rss_by_label.values())
+
+        if ram_gb_min > 0:
+            if rss_sum > 0:
+                attributed_ram = min(ram_avg, rss_sum)
+                scale = attributed_ram / rss_sum if rss_sum else 0.0
+                for label, rss in rss_by_label.items():
+                    part = rss * scale / 1_000_000_000.0 * dt / 60.0
+                    self._add(self.state["ram_consumers"], label, part)
+                rest = max(0.0, ram_avg - attributed_ram) / 1_000_000_000.0 * dt / 60.0
+                if rest > 0:
+                    self._add(self.state["ram_consumers"], "Система / кеш контейнера", rest)
+            else:
+                self._add(self.state["ram_consumers"], "Система / кеш контейнера", ram_gb_min)
+
+        self.latest = {
+            "cpu_vcpu": cpu_delta / dt,
+            "ram_bytes": cur["ram"],
+            "tx_bps": tx_delta / dt,
+            "rx_bps": rx_delta / dt,
+            "volume_bytes": cur["volume"],
+        }
+
+        if len(self.state["daily"]) > 90:
+            for day in sorted(self.state["daily"])[:-90]:
+                self.state["daily"].pop(day, None)
+
+    async def sample_once(self):
+        cur = self._reading()
+        async with self._lock:
+            if self._last is not None:
+                self._apply(self._last, cur)
+            self._last = cur
+
+            if cur["mono"] - self._last_save >= 30:
+                self._last_save = cur["mono"]
+                self._save_state()
+
+    async def _loop(self):
+        self._last = self._reading()
+        while True:
+            try:
+                await asyncio.sleep(self.interval)
+                await self.sample_once()
+            except asyncio.CancelledError:
+                self._save_state()
+                raise
+            except Exception as e:
+                print(f"RESOURCE_METER sample error: {e}")
+                await asyncio.sleep(self.interval)
+
+    def start(self):
+        self.install_network_hooks()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="local-railway-meter")
+            print("✅ Local Railway resource meter started")
+
+    @staticmethod
+    def _network_source(host):
+        host = (host or "").lower()
+        if host.endswith("newsky.app"):
+            return "NewSky"
+        if "github" in host or host.endswith("githubusercontent.com"):
+            return "GitHub"
+        if host.endswith("discord.com") or host.endswith("discordapp.com") or host.endswith("discord.gg"):
+            return "Discord"
+        return "Інше"
+
+    @staticmethod
+    def _body_size(data):
+        try:
+            if data is None:
+                return 0
+            if isinstance(data, bytes):
+                return len(data)
+            if isinstance(data, str):
+                return len(data.encode("utf-8"))
+            if isinstance(data, dict):
+                return len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            if isinstance(data, (list, tuple)):
+                return sum(LocalRailwayMeter._body_size(x) for x in data)
+            return 0
+        except Exception:
+            return 0
+
+    def record_network(self, source, byte_count, requests=0, frames=0):
+        item = self.state["network_sources"].setdefault(
+            source,
+            {"bytes": 0, "requests": 0, "frames": 0},
+        )
+        item["bytes"] = int(item.get("bytes", 0)) + max(0, int(byte_count))
+        item["requests"] = int(item.get("requests", 0)) + int(requests)
+        item["frames"] = int(item.get("frames", 0)) + int(frames)
+
+    def install_network_hooks(self):
+        LocalRailwayMeter._active = self
+        if LocalRailwayMeter._installed:
+            return
+        LocalRailwayMeter._installed = True
+
+        LocalRailwayMeter._orig_request = aiohttp.ClientSession._request
+
+        async def wrapped_request(session, method, url, **kwargs):
+            meter = LocalRailwayMeter._active
+            if meter:
+                try:
+                    host = urlsplit(str(url)).hostname or ""
+                except Exception:
+                    host = ""
+                source = meter._network_source(host)
+                size = len(str(method).encode("utf-8")) + len(str(url).encode("utf-8")) + 16
+                for k, v in (kwargs.get("headers") or {}).items():
+                    size += len(str(k).encode("utf-8")) + len(str(v).encode("utf-8")) + 4
+                if kwargs.get("json") is not None:
+                    size += meter._body_size(kwargs.get("json"))
+                else:
+                    size += meter._body_size(kwargs.get("data"))
+                meter.record_network(source, size, requests=1)
+            return await LocalRailwayMeter._orig_request(session, method, url, **kwargs)
+
+        aiohttp.ClientSession._request = wrapped_request
+
+        if hasattr(aiohttp, "ClientWebSocketResponse"):
+            LocalRailwayMeter._orig_ws_str = aiohttp.ClientWebSocketResponse.send_str
+            LocalRailwayMeter._orig_ws_bytes = aiohttp.ClientWebSocketResponse.send_bytes
+
+            async def wrapped_ws_str(ws, data, *args, **kwargs):
+                meter = LocalRailwayMeter._active
+                if meter:
+                    meter.record_network("Discord", len(str(data).encode("utf-8")) + 8, frames=1)
+                return await LocalRailwayMeter._orig_ws_str(ws, data, *args, **kwargs)
+
+            async def wrapped_ws_bytes(ws, data, *args, **kwargs):
+                meter = LocalRailwayMeter._active
+                if meter:
+                    try:
+                        size = len(data) + 8
+                    except Exception:
+                        size = 8
+                    meter.record_network("Discord", size, frames=1)
+                return await LocalRailwayMeter._orig_ws_bytes(ws, data, *args, **kwargs)
+
+            aiohttp.ClientWebSocketResponse.send_str = wrapped_ws_str
+            aiohttp.ClientWebSocketResponse.send_bytes = wrapped_ws_bytes
+
+    @classmethod
+    def _costs(cls, usage):
+        cpu = float(usage.get("cpu_seconds", 0.0)) / 60.0 * cls.CPU_USD_PER_VCPU_MONTH / cls.MONTH_MINUTES
+        ram = float(usage.get("ram_gb_minutes", 0.0)) * cls.RAM_USD_PER_GB_MONTH / cls.MONTH_MINUTES
+        net = float(usage.get("tx_bytes", 0)) / 1_000_000_000.0 * cls.EGRESS_USD_PER_GB
+        vol = float(usage.get("volume_gb_minutes", 0.0)) * cls.VOLUME_USD_PER_GB_MONTH / cls.MONTH_MINUTES
+        return {"cpu": cpu, "ram": ram, "network": net, "volume": vol, "total": cpu + ram + net + vol}
+
+    @staticmethod
+    def _money(value):
+        return "$" + f"{float(value):.4f}"
+
+    @staticmethod
+    def _bytes(value):
+        n = float(value or 0)
+        units = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        while n >= 1000 and i < len(units) - 1:
+            n /= 1000.0
+            i += 1
+        return f"{n:.2f} {units[i]}"
+
+    def _top_volume_files(self, limit=10):
+        rows = []
+        try:
+            for root, _, files in os.walk(self.volume_path):
+                for name in files:
+                    path = os.path.join(root, name)
+                    try:
+                        size = os.path.getsize(path)
+                        rel = os.path.relpath(path, self.volume_path)
+                        rows.append((size, rel))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        rows.sort(reverse=True)
+        return rows[:limit]
+
+    async def snapshot(self):
+        await self.sample_once()
+        async with self._lock:
+            return json.loads(json.dumps(self.state)), dict(self.latest)
+
+    async def embed(self, page=0):
+        state, latest = await self.snapshot()
+        total = state["totals"]
+        costs = self._costs(total)
+        page = page % 4
+
+        titles = ["Огляд", "CPU / RAM", "Мережа", "Диск"]
+        e = discord.Embed(
+            title=f"🚂 Railway — {titles[page]}",
+            color=0x7A5AF8,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        if page == 0:
+            e.description = (
+                f"**Всього нараховано ботом: {self._money(costs['total'])}**\n\n"
+                f"⚙️ CPU: **{float(total.get('cpu_seconds',0))/60:.2f} vCPU-хв** → {self._money(costs['cpu'])}\n"
+                f"🧠 RAM: **{float(total.get('ram_gb_minutes',0)):.2f} GB-хв** → {self._money(costs['ram'])}\n"
+                f"🌐 Network egress: **{self._bytes(total.get('tx_bytes',0))}** → {self._money(costs['network'])}\n"
+                f"💾 Volume: **{float(total.get('volume_gb_minutes',0)):.4f} GB-хв** → {self._money(costs['volume'])}\n\n"
+                f"Зараз: CPU {latest['cpu_vcpu']:.4f} vCPU | RAM {self._bytes(latest['ram_bytes'])}"
+            )
+
+        elif page == 1:
+            cpu_total = max(float(total.get("cpu_seconds", 0.0)), 1e-12)
+            ram_total = max(float(total.get("ram_gb_minutes", 0.0)), 1e-12)
+
+            cpu_rows = sorted(
+                state.get("cpu_consumers", {}).items(),
+                key=lambda x: float(x[1]),
+                reverse=True,
+            )[:8]
+            ram_rows = sorted(
+                state.get("ram_consumers", {}).items(),
+                key=lambda x: float(x[1]),
+                reverse=True,
+            )[:8]
+
+            cpu_text = "\n".join(
+                f"**{name}** — {value/60:.2f} vCPU-хв ({value/cpu_total*100:.1f}%)"
+                for name, value in cpu_rows
+            ) or "Даних ще немає"
+
+            ram_text = "\n".join(
+                f"**{name}** — {value:.2f} GB-хв ({value/ram_total*100:.1f}%)"
+                for name, value in ram_rows
+            ) or "Даних ще немає"
+
+            e.add_field(name="⚙️ Хто спожив CPU", value=cpu_text[:1024], inline=False)
+            e.add_field(name="🧠 Хто спожив RAM", value=ram_text[:1024], inline=False)
+            e.add_field(
+                name="Зараз",
+                value=f"CPU: **{latest['cpu_vcpu']:.4f} vCPU**\nRAM: **{self._bytes(latest['ram_bytes'])}**",
+                inline=False,
+            )
+
+        elif page == 2:
+            tx_total = int(total.get("tx_bytes", 0))
+            known = state.get("network_sources", {})
+            known_bytes = sum(int(v.get("bytes", 0)) for v in known.values())
+            other = max(0, tx_total - known_bytes)
+
+            rows = []
+            for name, item in known.items():
+                rows.append((
+                    int(item.get("bytes", 0)),
+                    name,
+                    int(item.get("requests", 0)),
+                    int(item.get("frames", 0)),
+                ))
+            if other:
+                rows.append((other, "Протокол / невизначене", 0, 0))
+            rows.sort(reverse=True)
+
+            text_rows = []
+            for size, name, req, frames in rows[:10]:
+                pct = (size / tx_total * 100.0) if tx_total else 0.0
+                extra = ""
+                if req:
+                    extra += f" | {req} запитів"
+                if frames:
+                    extra += f" | {frames} WS"
+                text_rows.append(f"**{name}** — {self._bytes(size)} ({pct:.1f}%){extra}")
+
+            e.description = (
+                f"📤 Вихідний трафік: **{self._bytes(tx_total)}** → {self._money(costs['network'])}\n"
+                f"📥 Вхідний трафік: **{self._bytes(total.get('rx_bytes',0))}**\n\n"
+                + ("\n".join(text_rows) if text_rows else "Даних ще немає")
+            )
+
+        else:
+            files = self._top_volume_files()
+            file_text = "\n".join(
+                f"**{name}** — {self._bytes(size)}"
+                for size, name in files
+            ) or "Файлів немає"
+
+            e.description = (
+                f"💾 Зараз зайнято: **{self._bytes(latest['volume_bytes'])}**\n"
+                f"Накопичено: **{float(total.get('volume_gb_minutes',0)):.4f} GB-хв**\n"
+                f"Вартість: **{self._money(costs['volume'])}**\n\n"
+                f"**Хто займає місце:**\n{file_text}"
+            )
+
+        e.set_footer(text="Рахує сам bot.py від моменту встановлення лічильника")
+        return e
+
+
+class LocalRailwayView(discord.ui.View):
+    def __init__(self, meter, owner_id):
+        super().__init__(timeout=600)
+        self.meter = meter
+        self.owner_id = owner_id
+        self.page = 0
+        self.message = None
+
+        self.back = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary)
+        self.page_btn = discord.ui.Button(label="1/4 — Огляд", style=discord.ButtonStyle.secondary, disabled=True)
+        self.next = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary)
+        self.refresh = discord.ui.Button(label="Оновити", emoji="🔄", style=discord.ButtonStyle.primary)
+
+        self.back.callback = self._back
+        self.next.callback = self._next
+        self.refresh.callback = self._refresh
+
+        self.add_item(self.back)
+        self.add_item(self.page_btn)
+        self.add_item(self.next)
+        self.add_item(self.refresh)
+
+    def _sync(self):
+        names = ["Огляд", "CPU / RAM", "Мережа", "Диск"]
+        self.page_btn.label = f"{self.page + 1}/4 — {names[self.page]}"
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Запусти свою команду `!railway`.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _show(self, interaction):
+        self._sync()
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await self.meter.embed(self.page),
+            view=self,
+        )
+
+    async def _back(self, interaction):
+        self.page = (self.page - 1) % 4
+        await self._show(interaction)
+
+    async def _next(self, interaction):
+        self.page = (self.page + 1) % 4
+        await self._show(interaction)
+
+    async def _refresh(self, interaction):
+        await self._show(interaction)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+
+resource_meter = LocalRailwayMeter(interval=2)
+resource_meter.install_network_hooks()
+
+client = discord.Client(intents=intents)
 
 AIRPORTS_DB = {}
 HIDDEN_USERS = {}
@@ -2156,19 +2820,20 @@ async def on_message(message):
                     pass
     
 
-    # --- 🚂 COMMAND: !railway (ONE PAGED COST/RESOURCE PANEL) ---
+    # --- 🚂 КОМАНДА: !railway ---
     if message.content.strip().lower() == "!railway":
         if not is_admin:
             return await message.channel.send("🚫 **Access Denied**")
-
         try:
-            view = RailwayCostView(railway_monitor, message.author.id, page=0)
-            embed = await railway_monitor.build_embed(0, refresh_official=True)
-            panel_message = await message.channel.send(embed=embed, view=view)
-            view.message = panel_message
+            view = LocalRailwayView(resource_meter, message.author.id)
+            panel = await message.channel.send(
+                embed=await resource_meter.embed(0),
+                view=view,
+            )
+            view.message = panel
         except Exception as e:
-            print(f"RAILWAY_PANEL_ERROR: {e}")
-            await message.channel.send(f"❌ **Railway monitor error:** `{str(e)[:1500]}`")
+            print(f"RESOURCE_PANEL_ERROR: {e}")
+            await message.channel.send(f"❌ Помилка лічильника: `{str(e)[:1200]}`")
         return
 
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
@@ -5578,9 +6243,8 @@ async def on_ready():
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
 
-    # Start persistent Railway resource/cost sampling (safe against duplicate on_ready calls).
-    railway_monitor.start()
-    
+    resource_meter.start()
+
     # Запускаємо єдиний розумний диспетчер замість трьох старих!
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
