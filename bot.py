@@ -216,42 +216,313 @@ class RamRefreshView(discord.ui.View):
                 pass
 
 
-class VolumeDeleteView(discord.ui.View):
-    def __init__(self, owner_id, target_path):
-        super().__init__(timeout=60)
+class VolumeFileSelect(discord.ui.Select):
+    def __init__(self, manager):
+        self.manager = manager
+        options = manager._select_options()
+        super().__init__(
+            placeholder="Вибери файл з Volume…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.manager.select_file(interaction, int(self.values[0]))
+
+
+class VolumeFileManagerView(discord.ui.View):
+    PAGE_SIZE = 25
+
+    def __init__(self, owner_id):
+        super().__init__(timeout=600)
         self.owner_id = owner_id
-        self.target_path = Path(target_path)
+        self.volume_root = Path("/app/data").resolve()
+        self.files = []
+        self.page = 0
+        self.selected_path = None
         self.message = None
+
+        self.prev_button = discord.ui.Button(
+            label="◀",
+            style=discord.ButtonStyle.secondary,
+        )
+        self.page_button = discord.ui.Button(
+            label="1/1",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+        self.next_button = discord.ui.Button(
+            label="▶",
+            style=discord.ButtonStyle.secondary,
+        )
+        self.delete_button = discord.ui.Button(
+            label="Видалити",
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger,
+            disabled=True,
+        )
+        self.refresh_button = discord.ui.Button(
+            label="Оновити",
+            emoji="🔄",
+            style=discord.ButtonStyle.primary,
+        )
+
+        self.prev_button.callback = self._prev_page
+        self.next_button.callback = self._next_page
+        self.delete_button.callback = self._delete_selected
+        self.refresh_button.callback = self._refresh_files
+
+        self._scan_files()
+        self._rebuild_items()
+
+    @staticmethod
+    def _fmt_size(value):
+        n = float(value)
+        units = ["B", "KB", "MB", "GB"]
+        i = 0
+        while n >= 1000 and i < len(units) - 1:
+            n /= 1000.0
+            i += 1
+        return f"{n:.2f} {units[i]}"
+
+    def _scan_files(self):
+        rows = []
+        try:
+            if self.volume_root.exists():
+                for path in self.volume_root.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    try:
+                        resolved = path.resolve()
+                        resolved.relative_to(self.volume_root)
+                        rows.append({
+                            "path": resolved,
+                            "name": str(resolved.relative_to(self.volume_root)),
+                            "size": resolved.stat().st_size,
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        rows.sort(key=lambda x: (-x["size"], x["name"].lower()))
+        self.files = rows
+
+        max_page = max(0, (len(self.files) - 1) // self.PAGE_SIZE)
+        self.page = min(self.page, max_page)
+
+    def _select_options(self):
+        start = self.page * self.PAGE_SIZE
+        chunk = self.files[start:start + self.PAGE_SIZE]
+
+        options = []
+        for absolute_index, item in enumerate(chunk, start=start):
+            name = item["name"]
+            label = name if len(name) <= 100 else "…" + name[-99:]
+
+            parent = str(Path(name).parent)
+            if parent == ".":
+                parent = "/app/data"
+
+            description = f"{self._fmt_size(item['size'])} • {parent}"
+            if len(description) > 100:
+                description = description[:97] + "..."
+
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(absolute_index),
+                    description=description,
+                    emoji="📄",
+                )
+            )
+
+        if not options:
+            options.append(
+                discord.SelectOption(
+                    label="Файлів немає",
+                    value="-1",
+                    description="Volume /app/data порожній",
+                    emoji="📭",
+                )
+            )
+
+        return options
+
+    def _rebuild_items(self):
+        self.clear_items()
+
+        select = VolumeFileSelect(self)
+        if not self.files:
+            select.disabled = True
+        self.add_item(select)
+
+        pages = max(1, (len(self.files) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page_button.label = f"{self.page + 1}/{pages}"
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= pages - 1
+        self.delete_button.disabled = self.selected_path is None
+
+        self.add_item(self.prev_button)
+        self.add_item(self.page_button)
+        self.add_item(self.next_button)
+        self.add_item(self.delete_button)
+        self.add_item(self.refresh_button)
+
+    def _list_embed(self, notice=None):
+        total_size = sum(int(x["size"]) for x in self.files)
+        start = self.page * self.PAGE_SIZE
+        chunk = self.files[start:start + self.PAGE_SIZE]
+
+        lines = []
+        for i, item in enumerate(chunk, start=start + 1):
+            lines.append(
+                f"**{i}.** `{item['name']}` — **{self._fmt_size(item['size'])}**"
+            )
+
+        description = (
+            f"Файлів: **{len(self.files)}** • Разом: **{self._fmt_size(total_size)}**\n"
+            "Вибери файл у списку нижче — бот покаже його початок перед видаленням."
+        )
+        if notice:
+            description = notice + "\n\n" + description
+
+        embed = discord.Embed(
+            title="💾 Файли Volume",
+            description=description,
+            color=0x7A5AF8,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Файли на цій сторінці",
+            value="\n".join(lines)[:1024] if lines else "Файлів немає.",
+            inline=False,
+        )
+        return embed
+
+    def _preview_embed(self, item):
+        path = item["path"]
+        size = item["size"]
+        preview = ""
+
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read(8192)
+
+            if b"\x00" in raw:
+                hex_preview = raw[:256].hex(" ")
+                preview = (
+                    "Бінарний файл. Перші 256 байтів у HEX:\n"
+                    + hex_preview
+                )
+            else:
+                text = raw.decode("utf-8", errors="replace")
+                lines = text.splitlines()
+
+                if len(lines) > 1:
+                    preview = "\n".join(lines[:30])
+                else:
+                    preview = text
+
+                preview = preview[:2500]
+                preview = preview.replace("```", "'''")
+
+                if size > len(raw):
+                    preview += "\n…"
+        except Exception as e:
+            preview = f"Не вдалося прочитати початок файлу: {e}"
+
+        try:
+            modified = datetime.fromtimestamp(
+                path.stat().st_mtime,
+                tz=timezone.utc,
+            ).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            modified = "невідомо"
+
+        embed = discord.Embed(
+            title="📄 Перегляд файлу перед видаленням",
+            description=(
+                f"**Файл:** `{item['name']}`\n"
+                f"**Розмір:** {self._fmt_size(size)}\n"
+                f"**Змінено:** {modified}\n\n"
+                f"**Початок файлу:**\n```text\n{preview}\n```"
+            ),
+            color=0xF1C40F,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text="Перевір вміст і тільки потім натискай «Видалити»")
+        return embed
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Це підтвердження іншого адміністратора.",
+                "Запусти свою команду !voldelete.",
                 ephemeral=True,
             )
             return False
         return True
 
-    @discord.ui.button(label="Видалити", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def select_file(self, interaction, index):
+        if index < 0 or index >= len(self.files):
+            return await interaction.response.send_message(
+                "Файл уже недоступний. Натисни «Оновити».",
+                ephemeral=True,
+            )
+
+        item = self.files[index]
+        path = item["path"]
+
         try:
-            if not self.target_path.exists() or not self.target_path.is_file():
-                for child in self.children:
-                    child.disabled = True
-                return await interaction.response.edit_message(
-                    content="⚠️ Файл уже відсутній.",
-                    view=self,
-                )
+            path.resolve().relative_to(self.volume_root)
+        except Exception:
+            return await interaction.response.send_message(
+                "❌ Некоректний шлях.",
+                ephemeral=True,
+            )
 
-            size = self.target_path.stat().st_size
-            name = self.target_path.name
-            self.target_path.unlink()
+        if not path.exists() or not path.is_file():
+            return await interaction.response.send_message(
+                "Файл уже відсутній. Натисни «Оновити».",
+                ephemeral=True,
+            )
 
-            for child in self.children:
-                child.disabled = True
+        self.selected_path = path
+        self.delete_button.disabled = False
+        self._rebuild_items()
+
+        await interaction.response.edit_message(
+            embed=self._preview_embed(item),
+            view=self,
+        )
+
+    async def _delete_selected(self, interaction):
+        if self.selected_path is None:
+            return await interaction.response.send_message(
+                "Спочатку вибери файл.",
+                ephemeral=True,
+            )
+
+        try:
+            target = self.selected_path.resolve()
+            target.relative_to(self.volume_root)
+
+            if not target.exists() or not target.is_file():
+                raise FileNotFoundError("файл уже відсутній")
+
+            size = target.stat().st_size
+            rel_name = str(target.relative_to(self.volume_root))
+            target.unlink()
+
+            self.selected_path = None
+            self._scan_files()
+            self._rebuild_items()
 
             await interaction.response.edit_message(
-                content=f"✅ Видалено з Volume: `{name}` ({size / 1_000_000:.2f} MB)",
+                embed=self._list_embed(
+                    f"✅ Видалено **`{rel_name}`** ({self._fmt_size(size)})."
+                ),
                 view=self,
             )
         except Exception as e:
@@ -260,12 +531,33 @@ class VolumeDeleteView(discord.ui.View):
                 ephemeral=True,
             )
 
-    @discord.ui.button(label="Скасувати", emoji="✖️", style=discord.ButtonStyle.secondary)
-    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
+    async def _prev_page(self, interaction):
+        if self.page > 0:
+            self.page -= 1
+        self.selected_path = None
+        self._rebuild_items()
         await interaction.response.edit_message(
-            content="❎ Видалення скасовано.",
+            embed=self._list_embed(),
+            view=self,
+        )
+
+    async def _next_page(self, interaction):
+        pages = max(1, (len(self.files) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        if self.page < pages - 1:
+            self.page += 1
+        self.selected_path = None
+        self._rebuild_items()
+        await interaction.response.edit_message(
+            embed=self._list_embed(),
+            view=self,
+        )
+
+    async def _refresh_files(self, interaction):
+        self.selected_path = None
+        self._scan_files()
+        self._rebuild_items()
+        await interaction.response.edit_message(
+            embed=self._list_embed("🔄 Список файлів оновлено."),
             view=self,
         )
 
@@ -274,9 +566,10 @@ class VolumeDeleteView(discord.ui.View):
             child.disabled = True
         if self.message:
             try:
-                await self.message.edit(content="⌛ Час підтвердження минув.", view=self)
+                await self.message.edit(view=self)
             except Exception:
                 pass
+
 
 
 AIRPORTS_DB = {}
@@ -2376,42 +2669,27 @@ async def on_message(message):
             await message.channel.send(f"❌ Помилка RAM: `{str(e)[:1200]}`")
         return
 
-    # --- 💾 КОМАНДА: !voldelete <файл> ---
+    # --- 💾 КОМАНДА: !voldelete ---
     if message.content.strip().lower().startswith("!voldelete"):
         if not is_admin:
             return await message.channel.send("🚫 **Access Denied**")
 
-        parts = message.content.strip().split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
-            return await message.channel.send(
-                "⚠️ Використання: `!voldelete <назва_файлу>`\n"
-                "Наприклад: `!voldelete railway_usage.json`"
-            )
-
-        volume_root = Path("/app/data").resolve()
-        requested = parts[1].strip().lstrip("/")
-
         try:
-            target = (volume_root / requested).resolve()
-            target.relative_to(volume_root)
-        except Exception:
-            return await message.channel.send("❌ Можна видаляти файли тільки всередині `/app/data`.")
+            view = VolumeFileManagerView(message.author.id)
 
-        if not target.exists():
-            return await message.channel.send(f"❌ Файл не знайдено: `{requested}`")
-        if not target.is_file():
-            return await message.channel.send("❌ Команда видаляє тільки файли, не папки.")
+            if not view.files:
+                return await message.channel.send("📭 Volume `/app/data` порожній.")
 
-        size = target.stat().st_size
-        rel_name = str(target.relative_to(volume_root))
-
-        view = VolumeDeleteView(message.author.id, target)
-        confirm_message = await message.channel.send(
-            f"⚠️ Видалити з Volume файл **`{rel_name}`** "
-            f"({_fmt_ram_mb(size)})?\nЦю дію не можна скасувати.",
-            view=view,
-        )
-        view.message = confirm_message
+            manager_message = await message.channel.send(
+                embed=view._list_embed(),
+                view=view,
+            )
+            view.message = manager_message
+        except Exception as e:
+            print(f"VOLDELETE_ERROR: {e}")
+            await message.channel.send(
+                f"❌ Помилка менеджера Volume: `{str(e)[:1200]}`"
+            )
         return
 
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
