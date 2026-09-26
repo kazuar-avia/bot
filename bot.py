@@ -6132,6 +6132,11 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             continue
         if before.get(rel_path) != content:
             files_to_push[rel_path] = content
+
+    # Після завершення pipeline тимчасові файли більше не потрібні.
+    # files_to_push вже містить готовий текст у пам'яті, тому workspace можна безпечно видалити.
+    shutil.rmtree(workdir, ignore_errors=True)
+
     return files_to_push
 
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
