@@ -14,10 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 from itertools import cycle
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from urllib.parse import urlsplit
 from aiohttp import web
 from discord.ext import tasks
 
@@ -69,767 +67,144 @@ AIRPORTS_DB_URL = "https://raw.githubusercontent.com/mwgg/Airports/master/airpor
 logging.basicConfig(level=logging.INFO)
 intents = discord.Intents.default()
 intents.message_content = True
+client = discord.Client(intents=intents)
+
 
 # ============================================================================
-# 🚂 ЛОКАЛЬНИЙ ЛІЧИЛЬНИК РЕСУРСІВ RAILWAY
-# Усе знаходиться в bot.py. Жодного Railway API: бот рахує ресурси сам.
+# 🧠 LIVE RAM + 💾 VOLUME FILE MANAGEMENT
 # ============================================================================
-class LocalRailwayMeter:
-    CPU_USD_PER_VCPU_MONTH = 20.0
-    RAM_USD_PER_GB_MONTH = 10.0
-    EGRESS_USD_PER_GB = 0.05
-    VOLUME_USD_PER_GB_MONTH = 0.15
-    MONTH_MINUTES = 43200.0
-    VERSION = 3
-
-    _installed = False
-    _active = None
-    _orig_request = None
-    _orig_ws_str = None
-    _orig_ws_bytes = None
-
-    def __init__(self, interval=1):
-        self.interval = max(1, int(interval))
-        self.state_file = Path("/app/data/railway_usage.json")
-        self.volume_path = Path("/app/data")
-        self._lock = asyncio.Lock()
-        self._task = None
-        self._last = None
-        self._last_save = 0.0
-
-        # Application-level outbound counters between kernel samples.
-        # They are reconciled to the REAL kernel TX total every sample.
-        self._pending_net = defaultdict(lambda: defaultdict(lambda: {"bytes": 0, "requests": 0, "frames": 0}))
-
-        self.latest = {
-            "cpu_vcpu": 0.0,
-            "ram_bytes": 0,
-            "tx_bps": 0.0,
-            "rx_bps": 0.0,
-            "volume_bytes": 0,
-        }
-        self.state = self._load_state()
-        LocalRailwayMeter._active = self
-
-    @staticmethod
-    def _empty_usage():
-        return {
-            "cpu_seconds": 0.0,
-            "ram_gb_minutes": 0.0,
-            "tx_bytes": 0,
-            "rx_bytes": 0,
-            "volume_gb_minutes": 0.0,
-        }
-
-    def _new_state(self):
-        return {
-            "version": self.VERSION,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "totals": self._empty_usage(),
-            "cpu_consumers": {},
-            "ram_consumers": {},
-            "network_groups": {},
-            "volume_consumers": {},
-            "daily": {},
-        }
-
-    def _load_state(self):
-        fresh = self._new_state()
+def _ram_cgroup_bytes():
+    for path in (
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+    ):
         try:
-            if self.state_file.exists():
-                old = json.loads(self.state_file.read_text(encoding="utf-8"))
-                if isinstance(old, dict) and old.get("version") == self.VERSION:
-                    fresh.update(old)
-                    fresh.setdefault("totals", self._empty_usage())
-                    fresh.setdefault("cpu_consumers", {})
-                    fresh.setdefault("ram_consumers", {})
-                    fresh.setdefault("network_groups", {})
-                    fresh.setdefault("volume_consumers", {})
-                    fresh.setdefault("daily", {})
-                elif isinstance(old, dict):
-                    print("ℹ️ RESOURCE_METER: стара неточна статистика скинута; починаю чистий облік v3.")
-        except Exception as e:
-            print(f"RESOURCE_METER load error: {e}")
-        return fresh
-
-    def _save_state(self):
-        try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.state_file.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps(self.state, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            tmp.replace(self.state_file)
-        except Exception as e:
-            print(f"RESOURCE_METER save error: {e}")
-
-    @staticmethod
-    def _read_cgroup_cpu():
-        try:
-            for line in Path("/sys/fs/cgroup/cpu.stat").read_text().splitlines():
-                if line.startswith("usage_usec "):
-                    return int(line.split()[1]) / 1_000_000.0
+            return max(0, int(Path(path).read_text().strip()))
         except Exception:
             pass
-        for path in (
-            "/sys/fs/cgroup/cpuacct/cpuacct.usage",
-            "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage",
-        ):
-            try:
-                return int(Path(path).read_text().strip()) / 1_000_000_000.0
-            except Exception:
-                pass
-        return time.process_time()
+    return 0
 
-    @staticmethod
-    def _read_cgroup_ram():
-        for path in (
-            "/sys/fs/cgroup/memory.current",
-            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-        ):
-            try:
-                return max(0, int(Path(path).read_text().strip()))
-            except Exception:
-                pass
-        return 0
 
-    @staticmethod
-    def _read_network():
-        rx = 0
-        tx = 0
-        try:
-            for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
-                if ":" not in line:
-                    continue
-                iface, data = line.split(":", 1)
-                if iface.strip() == "lo":
-                    continue
-                fields = data.split()
-                if len(fields) >= 9:
-                    rx += int(fields[0])
-                    tx += int(fields[8])
-        except Exception:
-            pass
-        return rx, tx
+def _ram_process_label(pid, cmdline, comm=""):
+    if pid == os.getpid():
+        return "bot.py"
 
-    def _volume_files(self):
-        result = {}
-        total = 0
-        try:
-            for root, _, files in os.walk(self.volume_path):
-                for name in files:
-                    path = os.path.join(root, name)
-                    try:
-                        st = os.stat(path, follow_symlinks=False)
-                        size = int(getattr(st, "st_blocks", 0)) * 512
-                        if size <= 0:
-                            size = int(st.st_size)
-                        rel = os.path.relpath(path, self.volume_path)
-                        result[rel] = size
-                        total += size
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return total, result
+    joined = " ".join(str(x).lower() for x in cmdline)
 
-    @staticmethod
-    def _process_label(pid, cmdline, comm=""):
-        if pid == os.getpid():
-            return "bot.py"
-
-        lower_parts = [str(x).lower() for x in cmdline]
-        joined = " ".join(lower_parts)
-
-        if "node" in joined:
-            for part in cmdline:
-                if str(part).lower().endswith(".js"):
-                    return "Node: " + os.path.basename(str(part))
-            return "Node"
-
-        if "python" in joined:
-            for part in cmdline:
-                if str(part).lower().endswith(".py"):
-                    return "Python: " + os.path.basename(str(part))
-            return "Python"
-
+    if "node" in joined:
         for part in cmdline:
-            text = str(part)
-            if text.lower().endswith(".sh"):
-                return "Shell: " + os.path.basename(text)
+            if str(part).lower().endswith(".js"):
+                return "Node: " + os.path.basename(str(part))
+        return "Node"
 
-        if cmdline:
-            exe = os.path.basename(str(cmdline[0]))
-            if exe:
-                return exe[:70]
+    if "python" in joined:
+        for part in cmdline:
+            if str(part).lower().endswith(".py"):
+                return "Python: " + os.path.basename(str(part))
+        return "Python"
 
-        if comm:
-            return comm[:70]
-        return "Інший процес"
+    for part in cmdline:
+        text = str(part)
+        if text.lower().endswith(".sh"):
+            return "Shell: " + os.path.basename(text)
 
-    @staticmethod
-    def _processes():
-        result = {}
-        ticks = float(os.sysconf(os.sysconf_names["SC_CLK_TCK"]))
-        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    if cmdline:
+        exe = os.path.basename(str(cmdline[0]))
+        if exe:
+            return exe[:70]
 
+    return comm[:70] if comm else "Інший процес"
+
+
+def _ram_process_breakdown():
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    by_name = {}
+
+    try:
+        pids = [int(x) for x in os.listdir("/proc") if x.isdigit()]
+    except Exception:
+        return by_name
+
+    for pid in pids:
         try:
-            pids = [int(x) for x in os.listdir("/proc") if x.isdigit()]
-        except Exception:
-            return result
+            stat_text = Path(f"/proc/{pid}/stat").read_text()
+            end = stat_text.rfind(")")
+            comm = stat_text[stat_text.find("(") + 1:end]
 
-        # IMPORTANT: scan ALL processes in the container, not only children of bot.py.
-        # Railway bills the whole container/cgroup.
-        for pid in pids:
             try:
-                stat_text = Path(f"/proc/{pid}/stat").read_text()
-                end = stat_text.rfind(")")
-                comm = stat_text[stat_text.find("(") + 1:end]
-                rest = stat_text[end + 2:].split()
-                cpu_seconds = (int(rest[11]) + int(rest[12])) / ticks
-
-                try:
-                    raw_cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
-                    cmdline = [x.decode("utf-8", "replace") for x in raw_cmd.split(b"\0") if x]
-                except Exception:
-                    cmdline = []
-
-                try:
-                    statm = Path(f"/proc/{pid}/statm").read_text().split()
-                    rss = int(statm[1]) * page_size
-                except Exception:
-                    rss = 0
-
-                result[pid] = {
-                    "cpu": cpu_seconds,
-                    "rss": rss,
-                    "label": LocalRailwayMeter._process_label(pid, cmdline, comm),
-                }
+                raw_cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+                cmdline = [x.decode("utf-8", "replace") for x in raw_cmd.split(b"\0") if x]
             except Exception:
-                pass
-        return result
+                cmdline = []
 
-    def _reading(self):
-        rx, tx = self._read_network()
-        volume_total, volume_files = self._volume_files()
-        return {
-            "mono": time.monotonic(),
-            "wall": datetime.now(timezone.utc),
-            "cpu": self._read_cgroup_cpu(),
-            "ram": self._read_cgroup_ram(),
-            "rx": rx,
-            "tx": tx,
-            "volume": volume_total,
-            "volume_files": volume_files,
-            "processes": self._processes(),
-        }
-
-    @staticmethod
-    def _add(mapping, key, value):
-        mapping[key] = float(mapping.get(key, 0.0)) + float(value)
-
-    @staticmethod
-    def _network_group(host):
-        h = (host or "невідомий-host").lower().strip(".")
-        if h.endswith("newsky.app"):
-            return "NewSky"
-        if h == "github.com" or h.endswith(".github.com") or "githubusercontent.com" in h:
-            return "GitHub"
-        if h.endswith("discord.com") or h.endswith("discordapp.com") or h.endswith("discord.gg"):
-            return "Discord"
-        return "Інше"
-
-    def record_network(self, host, byte_count, requests=0, frames=0):
-        host = (host or "невідомий-host").lower()
-        group = self._network_group(host)
-        item = self._pending_net[group][host]
-        item["bytes"] += max(0, int(byte_count))
-        item["requests"] += int(requests)
-        item["frames"] += int(frames)
-
-    def _consume_pending_network(self):
-        pending = self._pending_net
-        self._pending_net = defaultdict(lambda: defaultdict(lambda: {"bytes": 0, "requests": 0, "frames": 0}))
-        return pending
-
-    def _attribute_network(self, real_tx_delta, pending):
-        app_total = 0
-        for hosts in pending.values():
-            for item in hosts.values():
-                app_total += max(0, int(item.get("bytes", 0)))
-
-        # Reconcile application observations to REAL kernel TX.
-        # This makes the displayed consumers add up exactly to container TX.
-        allocations = []
-        allocated = 0
-        if app_total > 0 and real_tx_delta > 0:
-            flat = []
-            for group, hosts in pending.items():
-                for host, item in hosts.items():
-                    raw = max(0, int(item.get("bytes", 0)))
-                    share = raw / app_total if app_total else 0.0
-                    real = int(real_tx_delta * share)
-                    flat.append((group, host, item, real))
-                    allocated += real
-
-            # Rounding remainder goes to the largest observed destination.
-            remainder = max(0, real_tx_delta - allocated)
-            if flat and remainder:
-                largest_i = max(range(len(flat)), key=lambda i: int(flat[i][2].get("bytes", 0)))
-                g, h, it, real = flat[largest_i]
-                flat[largest_i] = (g, h, it, real + remainder)
-
-            allocations = flat
-
-        elif real_tx_delta > 0:
-            allocations = [("Невизначене", "невизначений-трафік", {"requests": 0, "frames": 0}, real_tx_delta)]
-
-        for group, host, item, real_bytes in allocations:
-            g = self.state["network_groups"].setdefault(
-                group,
-                {"bytes": 0, "requests": 0, "frames": 0, "hosts": {}},
-            )
-            g["bytes"] = int(g.get("bytes", 0)) + int(real_bytes)
-            g["requests"] = int(g.get("requests", 0)) + int(item.get("requests", 0))
-            g["frames"] = int(g.get("frames", 0)) + int(item.get("frames", 0))
-
-            h = g["hosts"].setdefault(host, {"bytes": 0, "requests": 0, "frames": 0})
-            h["bytes"] = int(h.get("bytes", 0)) + int(real_bytes)
-            h["requests"] = int(h.get("requests", 0)) + int(item.get("requests", 0))
-            h["frames"] = int(h.get("frames", 0)) + int(item.get("frames", 0))
-
-    def _apply(self, prev, cur, pending_net):
-        dt = cur["mono"] - prev["mono"]
-        if dt <= 0 or dt > 120:
-            return
-
-        cpu_delta = max(0.0, cur["cpu"] - prev["cpu"])
-        tx_delta = max(0, cur["tx"] - prev["tx"])
-        rx_delta = max(0, cur["rx"] - prev["rx"])
-        ram_avg = max(0.0, (prev["ram"] + cur["ram"]) / 2.0)
-        volume_avg = max(0.0, (prev["volume"] + cur["volume"]) / 2.0)
-
-        ram_gb_min = ram_avg / 1_000_000_000.0 * dt / 60.0
-        volume_gb_min = volume_avg / 1_000_000_000.0 * dt / 60.0
-
-        for bucket in (
-            self.state["totals"],
-            self.state["daily"].setdefault(cur["wall"].strftime("%Y-%m-%d"), self._empty_usage()),
-        ):
-            bucket["cpu_seconds"] = float(bucket.get("cpu_seconds", 0.0)) + cpu_delta
-            bucket["ram_gb_minutes"] = float(bucket.get("ram_gb_minutes", 0.0)) + ram_gb_min
-            bucket["tx_bytes"] = int(bucket.get("tx_bytes", 0)) + tx_delta
-            bucket["rx_bytes"] = int(bucket.get("rx_bytes", 0)) + rx_delta
-            bucket["volume_gb_minutes"] = float(bucket.get("volume_gb_minutes", 0.0)) + volume_gb_min
-
-        # CPU attribution across ALL visible container processes.
-        proc_cpu = defaultdict(float)
-        prev_proc = prev.get("processes", {})
-        for pid, item in cur.get("processes", {}).items():
-            old = prev_proc.get(pid)
-            if old:
-                delta = max(0.0, item["cpu"] - old["cpu"])
-            else:
-                # New process may have started between samples.
-                delta = max(0.0, item["cpu"])
-            proc_cpu[item["label"]] += delta
-
-        observed_cpu = sum(proc_cpu.values())
-        if observed_cpu > cpu_delta and observed_cpu > 0:
-            scale = cpu_delta / observed_cpu
-            for label in list(proc_cpu):
-                proc_cpu[label] *= scale
-            observed_cpu = cpu_delta
-
-        for label, value in proc_cpu.items():
-            if value > 0:
-                self._add(self.state["cpu_consumers"], label, value)
-
-        missing_cpu = max(0.0, cpu_delta - observed_cpu)
-        if missing_cpu > 0:
-            self._add(self.state["cpu_consumers"], "Короткі / невидимі процеси", missing_cpu)
-
-        # RAM attribution by process RSS, with cgroup remainder explicitly shown as cache/kernel.
-        rss_by_label = defaultdict(float)
-        for item in cur.get("processes", {}).values():
-            rss_by_label[item["label"]] += max(0, item["rss"])
-        rss_sum = sum(rss_by_label.values())
-
-        if ram_gb_min > 0:
-            attributed_ram = min(ram_avg, rss_sum)
-            if rss_sum > 0 and attributed_ram > 0:
-                scale = attributed_ram / rss_sum
-                for label, rss in rss_by_label.items():
-                    part = rss * scale / 1_000_000_000.0 * dt / 60.0
-                    if part > 0:
-                        self._add(self.state["ram_consumers"], label, part)
-
-            remainder = max(0.0, ram_avg - attributed_ram) / 1_000_000_000.0 * dt / 60.0
-            if remainder > 0:
-                self._add(self.state["ram_consumers"], "Файловий кеш / ядро контейнера", remainder)
-
-        # Network attribution reconciled to exact kernel TX.
-        self._attribute_network(tx_delta, pending_net)
-
-        # Volume attribution: exact allocated blocks per file integrated over time.
-        prev_files = prev.get("volume_files", {})
-        cur_files = cur.get("volume_files", {})
-        names = set(prev_files) | set(cur_files)
-        for name in names:
-            avg_bytes = (float(prev_files.get(name, 0)) + float(cur_files.get(name, 0))) / 2.0
-            gb_min = avg_bytes / 1_000_000_000.0 * dt / 60.0
-            if gb_min > 0:
-                self._add(self.state["volume_consumers"], name, gb_min)
-
-        self.latest = {
-            "cpu_vcpu": cpu_delta / dt,
-            "ram_bytes": cur["ram"],
-            "tx_bps": tx_delta / dt,
-            "rx_bps": rx_delta / dt,
-            "volume_bytes": cur["volume"],
-        }
-
-        if len(self.state["daily"]) > 90:
-            for day in sorted(self.state["daily"])[:-90]:
-                self.state["daily"].pop(day, None)
-
-    async def sample_once(self):
-        cur = self._reading()
-        async with self._lock:
-            pending = self._consume_pending_network()
-            if self._last is not None:
-                self._apply(self._last, cur, pending)
-            self._last = cur
-
-            if cur["mono"] - self._last_save >= 30:
-                self._last_save = cur["mono"]
-                self._save_state()
-
-    async def _loop(self):
-        self._last = self._reading()
-        while True:
-            try:
-                await asyncio.sleep(self.interval)
-                await self.sample_once()
-            except asyncio.CancelledError:
-                self._save_state()
-                raise
-            except Exception as e:
-                print(f"RESOURCE_METER sample error: {e}")
-                await asyncio.sleep(self.interval)
-
-    def start(self):
-        self.install_network_hooks()
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._loop(), name="local-railway-meter")
-            print("✅ Local Railway resource meter v3 started")
-
-    @staticmethod
-    def _body_size(data):
-        try:
-            if data is None:
-                return 0
-            if isinstance(data, bytes):
-                return len(data)
-            if isinstance(data, str):
-                return len(data.encode("utf-8"))
-            if isinstance(data, dict):
-                return len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            if isinstance(data, (list, tuple)):
-                return sum(LocalRailwayMeter._body_size(x) for x in data)
-            return 0
+            statm = Path(f"/proc/{pid}/statm").read_text().split()
+            rss = int(statm[1]) * page_size
+            label = _ram_process_label(pid, cmdline, comm)
+            by_name[label] = by_name.get(label, 0) + max(0, rss)
         except Exception:
-            return 0
+            pass
 
-    def install_network_hooks(self):
-        LocalRailwayMeter._active = self
-        if LocalRailwayMeter._installed:
-            return
-        LocalRailwayMeter._installed = True
+    return by_name
 
-        LocalRailwayMeter._orig_request = aiohttp.ClientSession._request
 
-        async def wrapped_request(session, method, url, **kwargs):
-            meter = LocalRailwayMeter._active
-            if meter:
-                try:
-                    host = urlsplit(str(url)).hostname or "невідомий-host"
-                except Exception:
-                    host = "невідомий-host"
+def _fmt_ram_mb(value):
+    return f"{float(value) / 1_000_000:.1f} MB"
 
-                size = len(str(method).encode("utf-8")) + len(str(url).encode("utf-8")) + 16
-                for k, v in (kwargs.get("headers") or {}).items():
-                    size += len(str(k).encode("utf-8")) + len(str(v).encode("utf-8")) + 4
 
-                if kwargs.get("json") is not None:
-                    size += meter._body_size(kwargs.get("json"))
-                else:
-                    size += meter._body_size(kwargs.get("data"))
+async def build_ram_embed():
+    total_ram = _ram_cgroup_bytes()
+    by_name = _ram_process_breakdown()
+    process_total = sum(by_name.values())
+    cache_kernel = max(0, total_ram - process_total)
 
-                meter.record_network(host, size, requests=1)
+    def pct(value):
+        return (float(value) / float(total_ram) * 100.0) if total_ram else 0.0
 
-            return await LocalRailwayMeter._orig_request(session, method, url, **kwargs)
+    rows = sorted(by_name.items(), key=lambda x: x[1], reverse=True)
+    lines = [
+        f"**{name}** — {_fmt_ram_mb(value)} ({pct(value):.1f}%)"
+        for name, value in rows[:15]
+    ]
 
-        aiohttp.ClientSession._request = wrapped_request
-
-        if hasattr(aiohttp, "ClientWebSocketResponse"):
-            LocalRailwayMeter._orig_ws_str = aiohttp.ClientWebSocketResponse.send_str
-            LocalRailwayMeter._orig_ws_bytes = aiohttp.ClientWebSocketResponse.send_bytes
-
-            async def wrapped_ws_str(ws, data, *args, **kwargs):
-                meter = LocalRailwayMeter._active
-                if meter:
-                    try:
-                        host = ws._response.url.host or "gateway.discord.gg"
-                    except Exception:
-                        host = "gateway.discord.gg"
-                    meter.record_network(host, len(str(data).encode("utf-8")) + 8, frames=1)
-                return await LocalRailwayMeter._orig_ws_str(ws, data, *args, **kwargs)
-
-            async def wrapped_ws_bytes(ws, data, *args, **kwargs):
-                meter = LocalRailwayMeter._active
-                if meter:
-                    try:
-                        host = ws._response.url.host or "gateway.discord.gg"
-                    except Exception:
-                        host = "gateway.discord.gg"
-                    try:
-                        size = len(data) + 8
-                    except Exception:
-                        size = 8
-                    meter.record_network(host, size, frames=1)
-                return await LocalRailwayMeter._orig_ws_bytes(ws, data, *args, **kwargs)
-
-            aiohttp.ClientWebSocketResponse.send_str = wrapped_ws_str
-            aiohttp.ClientWebSocketResponse.send_bytes = wrapped_ws_bytes
-
-    @classmethod
-    def _costs(cls, usage):
-        cpu = float(usage.get("cpu_seconds", 0.0)) / 60.0 * cls.CPU_USD_PER_VCPU_MONTH / cls.MONTH_MINUTES
-        ram = float(usage.get("ram_gb_minutes", 0.0)) * cls.RAM_USD_PER_GB_MONTH / cls.MONTH_MINUTES
-        net = float(usage.get("tx_bytes", 0)) / 1_000_000_000.0 * cls.EGRESS_USD_PER_GB
-        vol = float(usage.get("volume_gb_minutes", 0.0)) * cls.VOLUME_USD_PER_GB_MONTH / cls.MONTH_MINUTES
-        return {"cpu": cpu, "ram": ram, "network": net, "volume": vol, "total": cpu + ram + net + vol}
-
-    @classmethod
-    def _cpu_cost(cls, seconds):
-        return float(seconds) / 60.0 * cls.CPU_USD_PER_VCPU_MONTH / cls.MONTH_MINUTES
-
-    @classmethod
-    def _ram_cost(cls, gb_minutes):
-        return float(gb_minutes) * cls.RAM_USD_PER_GB_MONTH / cls.MONTH_MINUTES
-
-    @classmethod
-    def _network_cost(cls, byte_count):
-        return float(byte_count) / 1_000_000_000.0 * cls.EGRESS_USD_PER_GB
-
-    @classmethod
-    def _volume_cost(cls, gb_minutes):
-        return float(gb_minutes) * cls.VOLUME_USD_PER_GB_MONTH / cls.MONTH_MINUTES
-
-    @staticmethod
-    def _money(value):
-        return "$" + f"{float(value):.5f}"
-
-    @staticmethod
-    def _bytes(value):
-        n = float(value or 0)
-        units = ["B", "KB", "MB", "GB", "TB"]
-        i = 0
-        while n >= 1000 and i < len(units) - 1:
-            n /= 1000.0
-            i += 1
-        return f"{n:.2f} {units[i]}"
-
-    @staticmethod
-    def _pct(value, total):
-        return (float(value) / float(total) * 100.0) if total else 0.0
-
-    async def snapshot(self):
-        await self.sample_once()
-        async with self._lock:
-            return json.loads(json.dumps(self.state)), dict(self.latest)
-
-    async def embed(self, page=0):
-        state, latest = await self.snapshot()
-        total = state["totals"]
-        costs = self._costs(total)
-        page = page % 5
-        titles = ["Огляд", "CPU", "RAM", "Мережа", "Диск"]
-
-        e = discord.Embed(
-            title=f"🚂 Railway — {titles[page]}",
-            color=0x7A5AF8,
-            timestamp=datetime.now(timezone.utc),
+    if cache_kernel > 0:
+        lines.append(
+            f"**Файловий кеш / ядро контейнера** — "
+            f"{_fmt_ram_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)"
         )
 
-        if page == 0:
-            e.description = (
-                f"💵 **Разом: {self._money(costs['total'])}**\n\n"
-                f"⚙️ CPU — **{float(total.get('cpu_seconds', 0))/60:.3f} vCPU-хв** → **{self._money(costs['cpu'])}**\n"
-                f"🧠 RAM — **{float(total.get('ram_gb_minutes', 0)):.3f} GB-хв** → **{self._money(costs['ram'])}**\n"
-                f"🌐 Egress — **{self._bytes(total.get('tx_bytes', 0))}** → **{self._money(costs['network'])}**\n"
-                f"💾 Volume — **{float(total.get('volume_gb_minutes', 0)):.5f} GB-хв** → **{self._money(costs['volume'])}**\n\n"
-                f"Зараз: **{latest['cpu_vcpu']:.4f} vCPU**, **{self._bytes(latest['ram_bytes'])} RAM**"
-            )
-
-        elif page == 1:
-            rows = sorted(
-                state.get("cpu_consumers", {}).items(),
-                key=lambda x: float(x[1]),
-                reverse=True,
-            )
-            cpu_total = float(total.get("cpu_seconds", 0.0))
-            lines = []
-            for name, seconds in rows[:12]:
-                lines.append(
-                    f"**{name}**\n"
-                    f"└ {seconds:.3f} с CPU | {self._pct(seconds, cpu_total):.1f}% | {self._money(self._cpu_cost(seconds))}"
-                )
-            e.description = (
-                f"Всього: **{cpu_total/60:.3f} vCPU-хв** → **{self._money(costs['cpu'])}**\n"
-                f"Зараз: **{latest['cpu_vcpu']:.4f} vCPU**\n\n"
-                + ("\n".join(lines) if lines else "Даних ще немає")
-            )
-
-        elif page == 2:
-            rows = sorted(
-                state.get("ram_consumers", {}).items(),
-                key=lambda x: float(x[1]),
-                reverse=True,
-            )
-            ram_total = float(total.get("ram_gb_minutes", 0.0))
-            lines = []
-            for name, gbmin in rows[:12]:
-                lines.append(
-                    f"**{name}**\n"
-                    f"└ {gbmin:.3f} GB-хв | {self._pct(gbmin, ram_total):.1f}% | {self._money(self._ram_cost(gbmin))}"
-                )
-            e.description = (
-                f"Всього: **{ram_total:.3f} GB-хв** → **{self._money(costs['ram'])}**\n"
-                f"Зараз: **{self._bytes(latest['ram_bytes'])}**\n\n"
-                + ("\n".join(lines) if lines else "Даних ще немає")
-            )
-
-        elif page == 3:
-            tx_total = int(total.get("tx_bytes", 0))
-            groups = state.get("network_groups", {})
-            lines = []
-
-            for group, item in sorted(
-                groups.items(),
-                key=lambda kv: int(kv[1].get("bytes", 0)),
-                reverse=True,
-            ):
-                size = int(item.get("bytes", 0))
-                lines.append(
-                    f"**{group} — {self._bytes(size)}** "
-                    f"({self._pct(size, tx_total):.1f}%) → {self._money(self._network_cost(size))}"
-                )
-
-                hosts = sorted(
-                    (item.get("hosts") or {}).items(),
-                    key=lambda kv: int(kv[1].get("bytes", 0)),
-                    reverse=True,
-                )[:5]
-
-                for host, h in hosts:
-                    hsize = int(h.get("bytes", 0))
-                    extra = []
-                    if int(h.get("requests", 0)):
-                        extra.append(f"{int(h.get('requests',0))} HTTP")
-                    if int(h.get("frames", 0)):
-                        extra.append(f"{int(h.get('frames',0))} WS")
-                    suffix = " | " + ", ".join(extra) if extra else ""
-                    lines.append(
-                        f"└ {host}: {self._bytes(hsize)} ({self._pct(hsize, tx_total):.1f}%){suffix}"
-                    )
-
-            e.description = (
-                f"📤 Egress: **{self._bytes(tx_total)}** → **{self._money(costs['network'])}**\n"
-                f"📥 Ingress: **{self._bytes(total.get('rx_bytes', 0))}**\n"
-                f"Зараз TX: **{self._bytes(latest['tx_bps'])}/с**\n\n"
-                + ("\n".join(lines)[:3800] if lines else "Даних ще немає")
-            )
-
-        else:
-            vol_total = float(total.get("volume_gb_minutes", 0.0))
-            rows = sorted(
-                state.get("volume_consumers", {}).items(),
-                key=lambda x: float(x[1]),
-                reverse=True,
-            )
-            lines = []
-            for name, gbmin in rows[:15]:
-                lines.append(
-                    f"**{name}**\n"
-                    f"└ {gbmin:.6f} GB-хв | {self._pct(gbmin, vol_total):.1f}% | {self._money(self._volume_cost(gbmin))}"
-                )
-
-            e.description = (
-                f"Зараз зайнято: **{self._bytes(latest['volume_bytes'])}**\n"
-                f"Всього: **{vol_total:.6f} GB-хв** → **{self._money(costs['volume'])}**\n\n"
-                + ("\n".join(lines)[:3800] if lines else "Файлів ще немає")
-            )
-
-        e.set_footer(text="Локальний підрахунок bot.py • статистика v3 рахується з нуля")
-        return e
+    embed = discord.Embed(
+        title="🧠 RAM — використання зараз",
+        description=(
+            f"**Всього RAM:** {_fmt_ram_mb(total_ram)}\n"
+            f"**Процеси:** {_fmt_ram_mb(process_total)} ({pct(process_total):.1f}%)\n"
+            f"**Кеш / ядро:** {_fmt_ram_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)\n\n"
+            + ("\n".join(lines) if lines else "Процеси не знайдені.")
+        ),
+        color=0x7A5AF8,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="Поточний знімок RAM контейнера")
+    return embed
 
 
-class LocalRailwayView(discord.ui.View):
-    def __init__(self, meter, owner_id):
+class RamRefreshView(discord.ui.View):
+    def __init__(self, owner_id):
         super().__init__(timeout=600)
-        self.meter = meter
         self.owner_id = owner_id
-        self.page = 0
         self.message = None
 
-        self.back = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary)
-        self.page_btn = discord.ui.Button(label="1/5 — Огляд", style=discord.ButtonStyle.secondary, disabled=True)
-        self.next = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary)
-        self.refresh = discord.ui.Button(label="Оновити", emoji="🔄", style=discord.ButtonStyle.primary)
-
-        self.back.callback = self._back
-        self.next.callback = self._next
-        self.refresh.callback = self._refresh
-
-        self.add_item(self.back)
-        self.add_item(self.page_btn)
-        self.add_item(self.next)
-        self.add_item(self.refresh)
-
-    def _sync(self):
-        names = ["Огляд", "CPU", "RAM", "Мережа", "Диск"]
-        self.page_btn.label = f"{self.page + 1}/5 — {names[self.page]}"
-
-    async def interaction_check(self, interaction):
+    @discord.ui.button(label="Оновити", emoji="🔄", style=discord.ButtonStyle.primary)
+    async def refresh_ram(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "Запусти свою команду !railway.",
+            return await interaction.response.send_message(
+                "Запусти свою команду !ram.",
                 ephemeral=True,
             )
-            return False
-        return True
-
-    async def _show(self, interaction):
-        self._sync()
         await interaction.response.defer()
         await interaction.edit_original_response(
-            embed=await self.meter.embed(self.page),
+            embed=await build_ram_embed(),
             view=self,
         )
-
-    async def _back(self, interaction):
-        self.page = (self.page - 1) % 5
-        await self._show(interaction)
-
-    async def _next(self, interaction):
-        self.page = (self.page + 1) % 5
-        await self._show(interaction)
-
-    async def _refresh(self, interaction):
-        await self._show(interaction)
 
     async def on_timeout(self):
         for child in self.children:
@@ -841,10 +216,68 @@ class LocalRailwayView(discord.ui.View):
                 pass
 
 
-resource_meter = LocalRailwayMeter(interval=1)
-resource_meter.install_network_hooks()
+class VolumeDeleteView(discord.ui.View):
+    def __init__(self, owner_id, target_path):
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.target_path = Path(target_path)
+        self.message = None
 
-client = discord.Client(intents=intents)
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Це підтвердження іншого адміністратора.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Видалити", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not self.target_path.exists() or not self.target_path.is_file():
+                for child in self.children:
+                    child.disabled = True
+                return await interaction.response.edit_message(
+                    content="⚠️ Файл уже відсутній.",
+                    view=self,
+                )
+
+            size = self.target_path.stat().st_size
+            name = self.target_path.name
+            self.target_path.unlink()
+
+            for child in self.children:
+                child.disabled = True
+
+            await interaction.response.edit_message(
+                content=f"✅ Видалено з Volume: `{name}` ({size / 1_000_000:.2f} MB)",
+                view=self,
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Не вдалося видалити файл: `{str(e)[:1000]}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Скасувати", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="❎ Видалення скасовано.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(content="⌛ Час підтвердження минув.", view=self)
+            except Exception:
+                pass
+
 
 AIRPORTS_DB = {}
 HIDDEN_USERS = {}
@@ -2931,69 +2364,54 @@ async def on_message(message):
     if message.content.strip().lower() == "!ram":
         if not is_admin:
             return await message.channel.send("🚫 **Access Denied**")
-
         try:
-            total_ram = resource_meter._read_cgroup_ram()
-            processes = resource_meter._processes()
-
-            by_name = defaultdict(int)
-            for item in processes.values():
-                by_name[item["label"]] += max(0, int(item.get("rss", 0)))
-
-            process_total = sum(by_name.values())
-            cache_kernel = max(0, total_ram - process_total)
-
-            rows = sorted(by_name.items(), key=lambda x: x[1], reverse=True)
-
-            def fmt_mb(value):
-                return f"{value / 1_000_000:.1f} MB"
-
-            def pct(value):
-                return (value / total_ram * 100.0) if total_ram else 0.0
-
-            lines = []
-            for name, value in rows[:15]:
-                lines.append(f"**{name}** — {fmt_mb(value)} ({pct(value):.1f}%)")
-
-            if cache_kernel > 0:
-                lines.append(
-                    f"**Файловий кеш / ядро контейнера** — "
-                    f"{fmt_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)"
-                )
-
-            embed = discord.Embed(
-                title="🧠 RAM — використання зараз",
-                description=(
-                    f"**Всього RAM:** {fmt_mb(total_ram)}\n"
-                    f"**Процеси:** {fmt_mb(process_total)} ({pct(process_total):.1f}%)\n"
-                    f"**Кеш / ядро:** {fmt_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)\n\n"
-                    + ("\n".join(lines) if lines else "Процеси не знайдені.")
-                ),
-                color=0x7A5AF8,
-                timestamp=datetime.now(timezone.utc),
+            view = RamRefreshView(message.author.id)
+            ram_message = await message.channel.send(
+                embed=await build_ram_embed(),
+                view=view,
             )
-            embed.set_footer(text="Поточний знімок RAM контейнера")
-            await message.channel.send(embed=embed)
-
+            view.message = ram_message
         except Exception as e:
             print(f"RAM_COMMAND_ERROR: {e}")
             await message.channel.send(f"❌ Помилка RAM: `{str(e)[:1200]}`")
         return
 
-    # --- 🚂 КОМАНДА: !railway ---
-    if message.content.strip().lower() == "!railway":
+    # --- 💾 КОМАНДА: !voldelete <файл> ---
+    if message.content.strip().lower().startswith("!voldelete"):
         if not is_admin:
             return await message.channel.send("🚫 **Access Denied**")
-        try:
-            view = LocalRailwayView(resource_meter, message.author.id)
-            panel = await message.channel.send(
-                embed=await resource_meter.embed(0),
-                view=view,
+
+        parts = message.content.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return await message.channel.send(
+                "⚠️ Використання: `!voldelete <назва_файлу>`\n"
+                "Наприклад: `!voldelete railway_usage.json`"
             )
-            view.message = panel
-        except Exception as e:
-            print(f"RESOURCE_PANEL_ERROR: {e}")
-            await message.channel.send(f"❌ Помилка лічильника: `{str(e)[:1200]}`")
+
+        volume_root = Path("/app/data").resolve()
+        requested = parts[1].strip().lstrip("/")
+
+        try:
+            target = (volume_root / requested).resolve()
+            target.relative_to(volume_root)
+        except Exception:
+            return await message.channel.send("❌ Можна видаляти файли тільки всередині `/app/data`.")
+
+        if not target.exists():
+            return await message.channel.send(f"❌ Файл не знайдено: `{requested}`")
+        if not target.is_file():
+            return await message.channel.send("❌ Команда видаляє тільки файли, не папки.")
+
+        size = target.stat().st_size
+        rel_name = str(target.relative_to(volume_root))
+
+        view = VolumeDeleteView(message.author.id, target)
+        confirm_message = await message.channel.send(
+            f"⚠️ Видалити з Volume файл **`{rel_name}`** "
+            f"({_fmt_ram_mb(size)})?\nЦю дію не можна скасувати.",
+            view=view,
+        )
+        view.message = confirm_message
         return
 
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
@@ -6185,11 +5603,6 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             continue
         if before.get(rel_path) != content:
             files_to_push[rel_path] = content
-
-    # Після завершення pipeline тимчасові файли більше не потрібні.
-    # files_to_push вже містить готовий текст у пам'яті, тому workspace можна безпечно видалити.
-    shutil.rmtree(workdir, ignore_errors=True)
-
     return files_to_push
 
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
@@ -6407,9 +5820,7 @@ async def on_ready():
 
     if MONITORING_STARTED: return
     MONITORING_STARTED = True
-
-    resource_meter.start()
-
+    
     # Запускаємо єдиний розумний диспетчер замість трьох старих!
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
