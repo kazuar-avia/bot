@@ -2927,6 +2927,59 @@ async def on_message(message):
                     pass
     
 
+    # --- 🧠 КОМАНДА: !ram ---
+    if message.content.strip().lower() == "!ram":
+        if not is_admin:
+            return await message.channel.send("🚫 **Access Denied**")
+
+        try:
+            total_ram = resource_meter._read_cgroup_ram()
+            processes = resource_meter._processes()
+
+            by_name = defaultdict(int)
+            for item in processes.values():
+                by_name[item["label"]] += max(0, int(item.get("rss", 0)))
+
+            process_total = sum(by_name.values())
+            cache_kernel = max(0, total_ram - process_total)
+
+            rows = sorted(by_name.items(), key=lambda x: x[1], reverse=True)
+
+            def fmt_mb(value):
+                return f"{value / 1_000_000:.1f} MB"
+
+            def pct(value):
+                return (value / total_ram * 100.0) if total_ram else 0.0
+
+            lines = []
+            for name, value in rows[:15]:
+                lines.append(f"**{name}** — {fmt_mb(value)} ({pct(value):.1f}%)")
+
+            if cache_kernel > 0:
+                lines.append(
+                    f"**Файловий кеш / ядро контейнера** — "
+                    f"{fmt_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)"
+                )
+
+            embed = discord.Embed(
+                title="🧠 RAM — використання зараз",
+                description=(
+                    f"**Всього RAM:** {fmt_mb(total_ram)}\n"
+                    f"**Процеси:** {fmt_mb(process_total)} ({pct(process_total):.1f}%)\n"
+                    f"**Кеш / ядро:** {fmt_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)\n\n"
+                    + ("\n".join(lines) if lines else "Процеси не знайдені.")
+                ),
+                color=0x7A5AF8,
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.set_footer(text="Поточний знімок RAM контейнера")
+            await message.channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"RAM_COMMAND_ERROR: {e}")
+            await message.channel.send(f"❌ Помилка RAM: `{str(e)[:1200]}`")
+        return
+
     # --- 🚂 КОМАНДА: !railway ---
     if message.content.strip().lower() == "!railway":
         if not is_admin:
