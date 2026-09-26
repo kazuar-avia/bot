@@ -5804,6 +5804,37 @@ def _topsync_release_memory():
         pass
 
 
+def _topsync_cleanup_sync(workdir, before=None, tracked_paths=None, env=None):
+    """Heavy TOPSYNC cleanup. Runs only inside asyncio.to_thread()."""
+    try:
+        _topsync_drop_workspace_cache(workdir)
+    except Exception:
+        pass
+
+    try:
+        shutil.rmtree(workdir, ignore_errors=True)
+    except Exception:
+        pass
+
+    try:
+        if isinstance(before, dict):
+            before.clear()
+        if isinstance(tracked_paths, list):
+            tracked_paths.clear()
+        if isinstance(env, dict):
+            env.clear()
+    except Exception:
+        pass
+
+    _topsync_release_memory()
+
+
+async def _topsync_delayed_trim():
+    """One more trim after run_top_bonus_pipeline frame has had a chance to unwind."""
+    await asyncio.sleep(0)
+    await asyncio.to_thread(_topsync_release_memory)
+
+
 async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
     workdir = Path("/tmp/ucaa-top-bonus-sync")
     try:
@@ -5935,42 +5966,34 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
         return files_to_push
 
     finally:
-        # MAX cleanup AFTER run_top_bonus_pipeline work:
-        # 1) release page-cache pages for this temporary workspace;
-        # 2) delete all temporary TOPSYNC files;
-        # 3) drop large local references that are no longer needed;
-        # 4) force Python GC + glibc malloc_trim;
-        # 5) repeat trim on the next event-loop turn, when this function frame
-        #    has already disappeared.
+        # Heavy cleanup is moved OFF the Discord event loop.
+        # The bot can continue handling Discord/events while /tmp is scanned,
+        # page cache is released and files are removed.
         try:
-            _topsync_drop_workspace_cache(workdir)
+            before_ref = before if "before" in locals() else None
+            tracked_ref = tracked_paths if "tracked_paths" in locals() else None
+            env_ref = env if "env" in locals() else None
+
+            await asyncio.to_thread(
+                _topsync_cleanup_sync,
+                workdir,
+                before_ref,
+                tracked_ref,
+                env_ref,
+            )
+        except Exception as e:
+            print(f"TOPSYNC_RAM cleanup error: {e}")
+
+        # Drop the potentially large incoming string reference too.
+        charter_results = None
+
+        # Run one more trim after this coroutine yields, also outside event loop.
+        try:
+            asyncio.create_task(_topsync_delayed_trim())
         except Exception:
             pass
 
-        try:
-            shutil.rmtree(workdir, ignore_errors=True)
-        except Exception:
-            pass
-
-        try:
-            if "before" in locals() and isinstance(before, dict):
-                before.clear()
-            if "tracked_paths" in locals() and isinstance(tracked_paths, list):
-                tracked_paths.clear()
-            if "env" in locals() and isinstance(env, dict):
-                env.clear()
-            charter_results = None
-        except Exception:
-            pass
-
-        _topsync_release_memory()
-
-        try:
-            asyncio.get_running_loop().call_soon(_topsync_release_memory)
-        except Exception:
-            pass
-
-        print("TOPSYNC_RAM: workspace/cache removed, GC + malloc_trim completed.")
+        print("TOPSYNC_RAM: async cleanup completed; delayed trim scheduled.")
 
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     if not files_dict or not GITHUB_TOKEN: return False
