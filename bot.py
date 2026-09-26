@@ -1968,30 +1968,46 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
         embed = discord.Embed(title=f"⚫ {full_cs} flight cancelled", url=flight_url, description=desc, color=0x2b2d31)
 
     if embed:
-        # Маленьке ненав'язливе посилання на вступ до UKL внизу кожного flight-сповіщення.
-        join_line = "-# [Join UKL](https://newsky.app/airline/ukl/join)"
-        if embed.description:
-            embed.description = embed.description.rstrip() + "\n\n" + join_line
-        else:
-            embed.description = join_line
-
         try:
-            # --- СТВОРЮЄМО КНОПКИ ТІЛЬКИ ДЛЯ ЗАКРИТИХ РЕЙСІВ ---
+            # --- КНОПКИ ПІД FLIGHT-СПОВІЩЕННЯМ ---
             view = discord.ui.View(timeout=None)
+
             if status == "Completed":
-                # 1. Кнопка статистики
-                view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="🌍 Global Stats", custom_id=f"gstats_{fid}"))
-                
-                # 2. Кнопка кабінету пілота
+                # Основні дії завершеного рейсу — перший ряд.
+                view.add_item(
+                    discord.ui.Button(
+                        style=discord.ButtonStyle.secondary,
+                        label="🌍 Global Stats",
+                        custom_id=f"gstats_{fid}",
+                        row=0,
+                    )
+                )
+
                 pilot_id = f.get("pilot", {}).get("_id", "unknown")
                 if pilot_id != "unknown":
                     profile_url = f"https://kazuar.in.ua/pilot-cabinet.html#profile/{pilot_id}"
-                    view.add_item(discord.ui.Button(label="Особистий кабінет пілота", style=discord.ButtonStyle.link, url=profile_url))
-                
+                    view.add_item(
+                        discord.ui.Button(
+                            label="Особистий кабінет пілота",
+                            style=discord.ButtonStyle.link,
+                            url=profile_url,
+                            row=0,
+                        )
+                    )
+
+            # Ненав'язливе посилання на вступ — окремо від основного контенту.
+            view.add_item(
+                discord.ui.Button(
+                    label="Join UKL",
+                    emoji="✈️",
+                    style=discord.ButtonStyle.link,
+                    url="https://newsky.app/airline/ukl/join",
+                    row=1 if status == "Completed" else 0,
+                )
+            )
+
             # Розумна відправка (з кнопкою і реплаєм, якщо треба)
-            kwargs = {"embed": embed}
-            if status == "Completed": 
-                kwargs["view"] = view
+            kwargs = {"embed": embed, "view": view}
             if reply_to_id: 
                 kwargs["reference"] = discord.MessageReference(message_id=reply_to_id, channel_id=CHANNEL_ID, fail_if_not_exists=False)
 
