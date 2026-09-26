@@ -1968,6 +1968,13 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
         embed = discord.Embed(title=f"⚫ {full_cs} flight cancelled", url=flight_url, description=desc, color=0x2b2d31)
 
     if embed:
+        # Маленьке ненав'язливе посилання на вступ до UKL внизу кожного flight-сповіщення.
+        join_line = "-# [Join UKL](https://newsky.app/airline/ukl/join)"
+        if embed.description:
+            embed.description = embed.description.rstrip() + "\n\n" + join_line
+        else:
+            embed.description = join_line
+
         try:
             # --- СТВОРЮЄМО КНОПКИ ТІЛЬКИ ДЛЯ ЗАКРИТИХ РЕЙСІВ ---
             view = discord.ui.View(timeout=None)
