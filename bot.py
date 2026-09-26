@@ -1969,45 +1969,22 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
 
     if embed:
         try:
-            # --- КНОПКИ ПІД FLIGHT-СПОВІЩЕННЯМ ---
+            # --- СТВОРЮЄМО КНОПКИ ТІЛЬКИ ДЛЯ ЗАКРИТИХ РЕЙСІВ ---
             view = discord.ui.View(timeout=None)
-
             if status == "Completed":
-                # Основні дії завершеного рейсу — перший ряд.
-                view.add_item(
-                    discord.ui.Button(
-                        style=discord.ButtonStyle.secondary,
-                        label="🌍 Global Stats",
-                        custom_id=f"gstats_{fid}",
-                        row=0,
-                    )
-                )
-
+                # 1. Кнопка статистики
+                view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="🌍 Global Stats", custom_id=f"gstats_{fid}"))
+                
+                # 2. Кнопка кабінету пілота
                 pilot_id = f.get("pilot", {}).get("_id", "unknown")
                 if pilot_id != "unknown":
                     profile_url = f"https://kazuar.in.ua/pilot-cabinet.html#profile/{pilot_id}"
-                    view.add_item(
-                        discord.ui.Button(
-                            label="Особистий кабінет пілота",
-                            style=discord.ButtonStyle.link,
-                            url=profile_url,
-                            row=0,
-                        )
-                    )
-
-            # Ненав'язливе посилання на вступ — окремо від основного контенту.
-            view.add_item(
-                discord.ui.Button(
-                    label="Join UKL",
-                    emoji="✈️",
-                    style=discord.ButtonStyle.link,
-                    url="https://newsky.app/airline/ukl/join",
-                    row=1 if status == "Completed" else 0,
-                )
-            )
-
+                    view.add_item(discord.ui.Button(label="Особистий кабінет пілота", style=discord.ButtonStyle.link, url=profile_url))
+                
             # Розумна відправка (з кнопкою і реплаєм, якщо треба)
-            kwargs = {"embed": embed, "view": view}
+            kwargs = {"embed": embed}
+            if status == "Completed": 
+                kwargs["view"] = view
             if reply_to_id: 
                 kwargs["reference"] = discord.MessageReference(message_id=reply_to_id, channel_id=CHANNEL_ID, fail_if_not_exists=False)
 
