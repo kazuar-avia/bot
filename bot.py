@@ -5907,7 +5907,82 @@ def _topsync_release_memory():
         pass
 
 
-def _topsync_cleanup_sync(workdir, before=None, tracked_paths=None, env=None):
+def _topsync_file_cache_bytes():
+    """Current cgroup file-cache bytes from memory.stat."""
+    try:
+        stat = _ram_cgroup_stat()
+        return max(0, int(stat.get("file", stat.get("cache", 0))))
+    except Exception:
+        return 0
+
+
+def _topsync_reclaim_extra_cache(baseline_file_cache):
+    """Best-effort reclaim of file cache created by TOPSYNC, preserving baseline cache."""
+    reclaim_path = Path("/sys/fs/cgroup/memory.reclaim")
+    if not reclaim_path.exists():
+        print("TOPSYNC_RAM: memory.reclaim is unavailable on this cgroup.")
+        return
+
+    baseline = max(0, int(baseline_file_cache or 0))
+    before = _topsync_file_cache_bytes()
+    excess = max(0, before - baseline)
+
+    if excess <= 0:
+        print(
+            f"TOPSYNC_RAM: no extra file cache to reclaim "
+            f"(current={before/1_000_000:.1f} MB, baseline={baseline/1_000_000:.1f} MB)."
+        )
+        return
+
+    print(
+        f"TOPSYNC_RAM: reclaim requested for ~{excess/1_000_000:.1f} MB "
+        f"extra file cache (current={before/1_000_000:.1f} MB, "
+        f"baseline={baseline/1_000_000:.1f} MB)."
+    )
+
+    # A few rounds are intentional: memory.reclaim is best-effort and one write
+    # may reclaim less than requested. Never target below the pre-TOPSYNC baseline.
+    for _ in range(3):
+        current = _topsync_file_cache_bytes()
+        excess = max(0, current - baseline)
+        if excess <= 1_000_000:
+            break
+
+        payloads = [
+            f"{excess} swappiness=0",
+            str(excess),
+        ]
+
+        wrote = False
+        for payload in payloads:
+            try:
+                reclaim_path.write_text(payload, encoding="utf-8")
+                wrote = True
+                break
+            except Exception:
+                continue
+
+        if not wrote:
+            print("TOPSYNC_RAM: memory.reclaim exists but is not writable/accepted.")
+            return
+
+        time.sleep(0.05)
+
+    after = _topsync_file_cache_bytes()
+    reclaimed = max(0, before - after)
+    print(
+        f"TOPSYNC_RAM: file cache after reclaim={after/1_000_000:.1f} MB; "
+        f"reclaimed ~{reclaimed/1_000_000:.1f} MB."
+    )
+
+
+def _topsync_cleanup_sync(
+    workdir,
+    before=None,
+    tracked_paths=None,
+    env=None,
+    baseline_file_cache=0,
+):
     """Heavy TOPSYNC cleanup. Runs only inside asyncio.to_thread()."""
     try:
         _topsync_drop_workspace_cache(workdir)
@@ -5931,6 +6006,13 @@ def _topsync_cleanup_sync(workdir, before=None, tracked_paths=None, env=None):
 
     _topsync_release_memory()
 
+    # After temp files are gone and Python heap is trimmed, ask cgroup v2
+    # to reclaim only the file-cache growth caused by this TOPSYNC run.
+    try:
+        _topsync_reclaim_extra_cache(baseline_file_cache)
+    except Exception as e:
+        print(f"TOPSYNC_RAM reclaim error: {e}")
+
 
 async def _topsync_delayed_trim():
     """One more trim after run_top_bonus_pipeline frame has had a chance to unwind."""
@@ -5940,6 +6022,10 @@ async def _topsync_delayed_trim():
 
 async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
     workdir = Path("/tmp/ucaa-top-bonus-sync")
+    baseline_file_cache = _topsync_file_cache_bytes()
+    print(
+        f"TOPSYNC_RAM: baseline file cache={baseline_file_cache/1_000_000:.1f} MB."
+    )
     try:
         async def fail_top_sync(reason):
             print(f"TOPSYNC_FAIL: {reason}")
@@ -6083,6 +6169,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
                 before_ref,
                 tracked_ref,
                 env_ref,
+                baseline_file_cache,
             )
         except Exception as e:
             print(f"TOPSYNC_RAM cleanup error: {e}")
