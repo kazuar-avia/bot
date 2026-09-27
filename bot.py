@@ -5858,6 +5858,32 @@ def read_text_safe(path):
     except Exception:
         return None
 
+def _topsync_cleanup_workspace(workdir):
+    """Drop page cache for TOPSYNC workspace files, then remove the workspace."""
+    workdir = Path(workdir)
+
+    if workdir.exists() and hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        try:
+            for path in workdir.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    fd = os.open(str(path), os.O_RDONLY)
+                    try:
+                        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                    finally:
+                        os.close(fd)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(workdir, ignore_errors=True)
+    except Exception:
+        pass
+
+
 async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
     async def fail_top_sync(reason):
         print(f"TOPSYNC_FAIL: {reason}")
@@ -5876,115 +5902,119 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
         return await fail_top_sync("Node.js not found in Railway image. Check Railpack packages / build logs.")
 
     workdir = Path("/tmp/ucaa-top-bonus-sync")
-    if workdir.exists():
-        shutil.rmtree(workdir, ignore_errors=True)
-    (workdir / "scripts").mkdir(parents=True, exist_ok=True)
-    (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
-    (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
-
-    required_files = [
-        "ADcoordinates.json",
-        "scripts/update-top-pool.js",
-        "scripts/update-guaranteed-bonuses.js",
-        "COMPANY/livery-matching.json",
-        "COMPANY/ucaa-livery-database.json",
-        "COMPANY/guaranteed-bonuses.json",
-        "FLIGHTS/manifest.json",
-    ]
-    optional_files = [
-        "COMPANY/top-pool-current.json",
-        "COMPANY/top-awards-log.json",
-        "FLIGHTS/archive.json",
-    ]
-
-    for remote_path in required_files:
-        ok = await github_download_file(session, remote_path, workdir / remote_path, required=True)
-        if not ok:
-            return await fail_top_sync(f"cannot download required GitHub file: {remote_path}")
-    for remote_path in optional_files:
-        await github_download_file(session, remote_path, workdir / remote_path, required=False)
-
-    support_root_files = [
-        "aircraft-difficulty-coefficients.js",
-        "pilot-pay-policy.js",
-        "newsky-charter-results.txt",
-    ]
-    for support_file in support_root_files:
-        target = workdir / support_file
-
-        # Під час автоматичного 6-годинного циклу використовуємо СВІЖУ аналітику,
-        # яка щойно була згенерована, але ще не встигла потрапити в GitHub commit.
-        # Для ручного !topsync (charter_results=None) поведінка лишається стара:
-        # беремо останню версію з GitHub, а потім з live-site fallback.
-        if support_file == "newsky-charter-results.txt" and charter_results is not None:
-            target.write_text(charter_results, encoding="utf-8")
-            print("TOPSYNC_INFO: using fresh in-memory newsky-charter-results.txt from current sync cycle.")
-            continue
-
-        await github_download_file(session, support_file, target, required=False)
-        if not target.exists():
-            live_url = f"https://kazuar.in.ua/{support_file}"
-            try:
-                async with session.get(live_url, headers={"Cache-Control": "no-cache"}) as resp:
-                    if resp.status == 200:
-                        target.write_bytes(await resp.read())
-                        print(f"TOPSYNC_INFO: {support_file} downloaded from live site fallback.")
-                    elif support_file != "newsky-charter-results.txt":
-                        return await fail_top_sync(f"{support_file} missing; live fallback HTTP {resp.status}")
-            except Exception as e:
-                if support_file != "newsky-charter-results.txt":
-                    return await fail_top_sync(f"{support_file} missing; live fallback error: {e}")
-        if support_file != "newsky-charter-results.txt" and not target.exists():
-            return await fail_top_sync(f"{support_file} missing before Node run")
-
-    flights_count = await github_download_json_directory(session, "FLIGHTS", workdir / "FLIGHTS")
-    top_archives_count = await github_download_json_directory(session, "COMPANY/TOP-POOLS", workdir / "COMPANY" / "TOP-POOLS")
-    print(f"TOPSYNC_INFO: workspace ready: FLIGHTS json={flights_count}, TOP-POOLS json={top_archives_count}")
-
-    tracked_paths = [
-        "COMPANY/top-pool-current.json",
-        "COMPANY/top-awards-log.json",
-        "COMPANY/guaranteed-bonuses.json",
-    ]
-    for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
-        tracked_paths.append(str(top_file.relative_to(workdir)).replace("\\", "/"))
-    before = {path: read_text_safe(workdir / path) for path in tracked_paths}
-
-    env = os.environ.copy()
-    if NEWSKY_API_KEY and not env.get("NEWSKY_AIRLINE_TOKEN"):
-        env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
-
     try:
-        await asyncio.to_thread(
-            subprocess.run,
-            [node_bin, "scripts/update-top-pool.js"],
-            cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
-        )
-        await asyncio.to_thread(
-            subprocess.run,
-            [node_bin, "scripts/update-guaranteed-bonuses.js"],
-            cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
-        )
-    except subprocess.CalledProcessError as e:
-        detail = f"JS script failed with exit {e.returncode}. STDOUT: {(e.stdout or '')[-900:]} STDERR: {(e.stderr or '')[-900:]}"
-        return await fail_top_sync(detail[:1900])
-    except subprocess.TimeoutExpired as e:
-        return await fail_top_sync(f"JS script timeout: {e}")
+        if workdir.exists():
+            shutil.rmtree(workdir, ignore_errors=True)
+        (workdir / "scripts").mkdir(parents=True, exist_ok=True)
+        (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
+        (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
 
-    for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
-        rel_path = str(top_file.relative_to(workdir)).replace("\\", "/")
-        if rel_path not in tracked_paths:
-            tracked_paths.append(rel_path)
+        required_files = [
+            "ADcoordinates.json",
+            "scripts/update-top-pool.js",
+            "scripts/update-guaranteed-bonuses.js",
+            "COMPANY/livery-matching.json",
+            "COMPANY/ucaa-livery-database.json",
+            "COMPANY/guaranteed-bonuses.json",
+            "FLIGHTS/manifest.json",
+        ]
+        optional_files = [
+            "COMPANY/top-pool-current.json",
+            "COMPANY/top-awards-log.json",
+            "FLIGHTS/archive.json",
+        ]
 
-    files_to_push = {}
-    for rel_path in tracked_paths:
-        full_path = workdir / rel_path
-        content = read_text_safe(full_path)
-        if content is None:
-            continue
-        if before.get(rel_path) != content:
-            files_to_push[rel_path] = content
-    return files_to_push
+        for remote_path in required_files:
+            ok = await github_download_file(session, remote_path, workdir / remote_path, required=True)
+            if not ok:
+                return await fail_top_sync(f"cannot download required GitHub file: {remote_path}")
+        for remote_path in optional_files:
+            await github_download_file(session, remote_path, workdir / remote_path, required=False)
+
+        support_root_files = [
+            "aircraft-difficulty-coefficients.js",
+            "pilot-pay-policy.js",
+            "newsky-charter-results.txt",
+        ]
+        for support_file in support_root_files:
+            target = workdir / support_file
+
+            # Під час автоматичного 6-годинного циклу використовуємо СВІЖУ аналітику,
+            # яка щойно була згенерована, але ще не встигла потрапити в GitHub commit.
+            # Для ручного !topsync (charter_results=None) поведінка лишається стара:
+            # беремо останню версію з GitHub, а потім з live-site fallback.
+            if support_file == "newsky-charter-results.txt" and charter_results is not None:
+                target.write_text(charter_results, encoding="utf-8")
+                print("TOPSYNC_INFO: using fresh in-memory newsky-charter-results.txt from current sync cycle.")
+                continue
+
+            await github_download_file(session, support_file, target, required=False)
+            if not target.exists():
+                live_url = f"https://kazuar.in.ua/{support_file}"
+                try:
+                    async with session.get(live_url, headers={"Cache-Control": "no-cache"}) as resp:
+                        if resp.status == 200:
+                            target.write_bytes(await resp.read())
+                            print(f"TOPSYNC_INFO: {support_file} downloaded from live site fallback.")
+                        elif support_file != "newsky-charter-results.txt":
+                            return await fail_top_sync(f"{support_file} missing; live fallback HTTP {resp.status}")
+                except Exception as e:
+                    if support_file != "newsky-charter-results.txt":
+                        return await fail_top_sync(f"{support_file} missing; live fallback error: {e}")
+            if support_file != "newsky-charter-results.txt" and not target.exists():
+                return await fail_top_sync(f"{support_file} missing before Node run")
+
+        flights_count = await github_download_json_directory(session, "FLIGHTS", workdir / "FLIGHTS")
+        top_archives_count = await github_download_json_directory(session, "COMPANY/TOP-POOLS", workdir / "COMPANY" / "TOP-POOLS")
+        print(f"TOPSYNC_INFO: workspace ready: FLIGHTS json={flights_count}, TOP-POOLS json={top_archives_count}")
+
+        tracked_paths = [
+            "COMPANY/top-pool-current.json",
+            "COMPANY/top-awards-log.json",
+            "COMPANY/guaranteed-bonuses.json",
+        ]
+        for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
+            tracked_paths.append(str(top_file.relative_to(workdir)).replace("\\", "/"))
+        before = {path: read_text_safe(workdir / path) for path in tracked_paths}
+
+        env = os.environ.copy()
+        if NEWSKY_API_KEY and not env.get("NEWSKY_AIRLINE_TOKEN"):
+            env["NEWSKY_AIRLINE_TOKEN"] = NEWSKY_API_KEY
+
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                [node_bin, "scripts/update-top-pool.js"],
+                cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
+            )
+            await asyncio.to_thread(
+                subprocess.run,
+                [node_bin, "scripts/update-guaranteed-bonuses.js"],
+                cwd=str(workdir), env=env, check=True, capture_output=True, text=True, timeout=180
+            )
+        except subprocess.CalledProcessError as e:
+            detail = f"JS script failed with exit {e.returncode}. STDOUT: {(e.stdout or '')[-900:]} STDERR: {(e.stderr or '')[-900:]}"
+            return await fail_top_sync(detail[:1900])
+        except subprocess.TimeoutExpired as e:
+            return await fail_top_sync(f"JS script timeout: {e}")
+
+        for top_file in (workdir / "COMPANY" / "TOP-POOLS").glob("*.json"):
+            rel_path = str(top_file.relative_to(workdir)).replace("\\", "/")
+            if rel_path not in tracked_paths:
+                tracked_paths.append(rel_path)
+
+        files_to_push = {}
+        for rel_path in tracked_paths:
+            full_path = workdir / rel_path
+            content = read_text_safe(full_path)
+            if content is None:
+                continue
+            if before.get(rel_path) != content:
+                files_to_push[rel_path] = content
+        return files_to_push
+
+    finally:
+        await asyncio.to_thread(_topsync_cleanup_workspace, workdir)
 
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     if not files_dict or not GITHUB_TOKEN: return False
