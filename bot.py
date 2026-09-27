@@ -85,6 +85,28 @@ def _ram_cgroup_bytes():
     return 0
 
 
+def _ram_cgroup_stat():
+    """Read raw cgroup memory.stat counters (v2 first, v1 fallback)."""
+    for path in (
+        "/sys/fs/cgroup/memory.stat",
+        "/sys/fs/cgroup/memory/memory.stat",
+    ):
+        try:
+            result = {}
+            for line in Path(path).read_text().splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    try:
+                        result[parts[0]] = max(0, int(parts[1]))
+                    except Exception:
+                        pass
+            if result:
+                return result
+        except Exception:
+            pass
+    return {}
+
+
 def _ram_process_label(pid, cmdline, comm=""):
     if pid == os.getpid():
         return "bot.py"
@@ -153,37 +175,118 @@ def _fmt_ram_mb(value):
 
 async def build_ram_embed():
     total_ram = _ram_cgroup_bytes()
+    mem = _ram_cgroup_stat()
     by_name = _ram_process_breakdown()
     process_total = sum(by_name.values())
-    cache_kernel = max(0, total_ram - process_total)
 
     def pct(value):
         return (float(value) / float(total_ram) * 100.0) if total_ram else 0.0
 
-    rows = sorted(by_name.items(), key=lambda x: x[1], reverse=True)
-    lines = [
+    # cgroup v2: anon + file + kernel are the useful top-level buckets.
+    # shmem is a SUBSET of file, so split it out instead of double-counting it.
+    if "anon" in mem or "file" in mem or "kernel" in mem:
+        anon = int(mem.get("anon", 0))
+        file_total = int(mem.get("file", 0))
+        shmem = min(file_total, int(mem.get("shmem", 0)))
+        file_cache = max(0, file_total - shmem)
+        kernel = int(mem.get("kernel", 0))
+
+        accounted = anon + file_cache + shmem + kernel
+        other = max(0, total_ram - accounted)
+
+        category_lines = [
+            f"🧩 **Anonymous / heap процесів:** {_fmt_ram_mb(anon)} ({pct(anon):.1f}%)",
+            f"📁 **File cache:** {_fmt_ram_mb(file_cache)} ({pct(file_cache):.1f}%)",
+            f"🔗 **Shared memory (shmem):** {_fmt_ram_mb(shmem)} ({pct(shmem):.1f}%)",
+            f"⚙️ **Kernel:** {_fmt_ram_mb(kernel)} ({pct(kernel):.1f}%)",
+        ]
+        if other > 0:
+            category_lines.append(
+                f"❔ **Інше / різниця cgroup:** {_fmt_ram_mb(other)} ({pct(other):.1f}%)"
+            )
+
+        kernel_details = []
+        detail_map = [
+            ("sock", "Sockets"),
+            ("slab", "Slab"),
+            ("pagetables", "Page tables"),
+            ("kernel_stack", "Kernel stack"),
+        ]
+        for key, label in detail_map:
+            value = int(mem.get(key, 0))
+            if value > 0:
+                kernel_details.append(
+                    f"└ {label}: {_fmt_ram_mb(value)}"
+                )
+
+        # file_dirty/writeback are subsets of file cache and shown only as detail.
+        file_details = []
+        dirty = int(mem.get("file_dirty", 0))
+        writeback = int(mem.get("file_writeback", 0))
+        if dirty > 0:
+            file_details.append(f"└ Dirty: {_fmt_ram_mb(dirty)}")
+        if writeback > 0:
+            file_details.append(f"└ Writeback: {_fmt_ram_mb(writeback)}")
+
+    else:
+        # cgroup v1 fallback.
+        anon = int(mem.get("rss", 0))
+        cache = int(mem.get("cache", 0))
+        shmem = min(cache, int(mem.get("shmem", 0)))
+        file_cache = max(0, cache - shmem)
+        kernel = max(0, total_ram - anon - file_cache - shmem)
+        other = 0
+
+        category_lines = [
+            f"🧩 **RSS / anonymous:** {_fmt_ram_mb(anon)} ({pct(anon):.1f}%)",
+            f"📁 **File cache:** {_fmt_ram_mb(file_cache)} ({pct(file_cache):.1f}%)",
+            f"🔗 **Shared memory (shmem):** {_fmt_ram_mb(shmem)} ({pct(shmem):.1f}%)",
+            f"⚙️ **Kernel / інше:** {_fmt_ram_mb(kernel)} ({pct(kernel):.1f}%)",
+        ]
+        kernel_details = []
+        file_details = []
+
+    process_rows = sorted(by_name.items(), key=lambda x: x[1], reverse=True)
+    process_lines = [
         f"**{name}** — {_fmt_ram_mb(value)} ({pct(value):.1f}%)"
-        for name, value in rows[:15]
+        for name, value in process_rows[:15]
     ]
 
-    if cache_kernel > 0:
-        lines.append(
-            f"**Файловий кеш / ядро контейнера** — "
-            f"{_fmt_ram_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)"
-        )
-
     embed = discord.Embed(
-        title="🧠 RAM — використання зараз",
+        title="🧠 RAM — детальний стан зараз",
         description=(
-            f"**Всього RAM:** {_fmt_ram_mb(total_ram)}\n"
-            f"**Процеси:** {_fmt_ram_mb(process_total)} ({pct(process_total):.1f}%)\n"
-            f"**Кеш / ядро:** {_fmt_ram_mb(cache_kernel)} ({pct(cache_kernel):.1f}%)\n\n"
-            + ("\n".join(lines) if lines else "Процеси не знайдені.")
+            f"**Всього cgroup RAM:** {_fmt_ram_mb(total_ram)}\n"
+            f"**RSS усіх процесів:** {_fmt_ram_mb(process_total)} ({pct(process_total):.1f}%)\n\n"
+            f"### Що саме займає RAM\n"
+            + "\n".join(category_lines)
         ),
         color=0x7A5AF8,
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_footer(text="Поточний знімок RAM контейнера")
+
+    if file_details:
+        embed.add_field(
+            name="📁 File cache — деталі",
+            value="\n".join(file_details)[:1024],
+            inline=False,
+        )
+
+    if kernel_details:
+        embed.add_field(
+            name="⚙️ Kernel — що всередині",
+            value="\n".join(kernel_details)[:1024],
+            inline=False,
+        )
+
+    embed.add_field(
+        name="👥 Хто з процесів тримає RAM (RSS)",
+        value="\n".join(process_lines)[:1024] if process_lines else "Процеси не знайдені.",
+        inline=False,
+    )
+
+    embed.set_footer(
+        text="cgroup memory.stat + /proc RSS • підкатегорії можуть входити у більші категорії"
+    )
     return embed
 
 
