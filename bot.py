@@ -679,6 +679,8 @@ AIRPORTS_DB = {}
 HIDDEN_USERS = {}
 BANNED_WOW_MESSAGES = set()
 MONITORING_STARTED = False
+TOP_BONUS_PIPELINE_RUNNING = False
+SIX_HOUR_SYNC_RUNNING = False
 LAST_TRAFFIC_TIME = 0.0
 TAXIING_FLIGHTS = set()
 PROTECTED_CHANNEL_PROCESSING = set()
@@ -5885,6 +5887,8 @@ def _topsync_cleanup_workspace(workdir):
 
 
 async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
+    global TOP_BONUS_PIPELINE_RUNNING
+
     async def fail_top_sync(reason):
         print(f"TOPSYNC_FAIL: {reason}")
         if ctx:
@@ -5901,6 +5905,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
     if not node_bin:
         return await fail_top_sync("Node.js not found in Railway image. Check Railpack packages / build logs.")
 
+    TOP_BONUS_PIPELINE_RUNNING = True
     workdir = Path("/tmp/ucaa-top-bonus-sync")
     try:
         if workdir.exists():
@@ -6015,6 +6020,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
 
     finally:
         await asyncio.to_thread(_topsync_cleanup_workspace, workdir)
+        TOP_BONUS_PIPELINE_RUNNING = False
 
 async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     if not files_dict or not GITHUB_TOKEN: return False
@@ -6086,9 +6092,86 @@ async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     print("❌ Всі 3 спроби відправити дані на GitHub вичерпано. Рейс не записано.")
     return False
 
+# GUARANTEED BONUSES: lightweight GitHub Actions dispatch every 10 minutes.
+async def dispatch_guaranteed_bonus_workflow(session, max_retries=3):
+    if not GITHUB_TOKEN:
+        print("BONUS_DISPATCH_ERROR: missing GITHUB_TOKEN in Railway Variables")
+        return False
+
+    url = (
+        f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/"
+        "update-guaranteed-bonuses.yml/dispatches"
+    )
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with session.post(url, headers=headers, json={"ref": "main"}) as resp:
+                body = await resp.text()
+                if resp.status == 204:
+                    print("BONUS_DISPATCH_OK: update-guaranteed-bonuses.yml dispatched")
+                    return True
+
+                print(
+                    f"BONUS_DISPATCH_WARN: attempt {attempt}/{max_retries}, "
+                    f"HTTP {resp.status}: {body[:500]}"
+                )
+        except Exception as e:
+            print(f"BONUS_DISPATCH_WARN: attempt {attempt}/{max_retries}: {e}")
+
+        if attempt < max_retries:
+            await asyncio.sleep(2)
+
+    print("BONUS_DISPATCH_ERROR: all workflow_dispatch attempts failed")
+    return False
+
+
+@tasks.loop()
+async def guaranteed_bonus_dispatch_task():
+    # Always align to the next UTC xx:00/10/20/30/40/50 boundary.
+    now = datetime.now(timezone.utc)
+    next_minute = ((now.minute // 10) + 1) * 10
+    if next_minute >= 60:
+        next_run = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    else:
+        next_run = now.replace(minute=next_minute, second=0, microsecond=0)
+
+    sleep_seconds = max(0.0, (next_run - now).total_seconds())
+    print(
+        f"BONUS_DISPATCH_WAIT: {int(sleep_seconds)} sec until "
+        f"{next_run.strftime('%H:%M')} UTC"
+    )
+    await asyncio.sleep(sleep_seconds)
+
+    # At 00:00/06:00/12:00/18:00 the 6-hour Master Sync already runs
+    # update-guaranteed-bonuses.js locally, so do not dispatch a duplicate run.
+    if next_run.minute == 0 and next_run.hour % 6 == 0:
+        print(
+            f"BONUS_DISPATCH_SKIP: {next_run.strftime('%H:%M')} UTC is a 6-hour TOPSYNC slot"
+        )
+        return
+
+    # If the 6-hour cycle or a manual !topsync is still running at a later
+    # 10-minute boundary, skip this slot rather than overlap the same pipeline.
+    if SIX_HOUR_SYNC_RUNNING or TOP_BONUS_PIPELINE_RUNNING:
+        print(
+            f"BONUS_DISPATCH_SKIP: local TOPSYNC is still active at "
+            f"{next_run.strftime('%H:%M')} UTC"
+        )
+        return
+
+    async with aiohttp.ClientSession() as session:
+        await dispatch_guaranteed_bonus_workflow(session)
+
+
 # ГОЛОВНИЙ ДИСПЕТЧЕР
 @tasks.loop()
 async def master_github_sync_task():
+    global SIX_HOUR_SYNC_RUNNING
     # Розраховуємо час до початку наступної години (XX:00:00)
     now = datetime.now(timezone.utc)
     next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
@@ -6118,23 +6201,27 @@ async def master_github_sync_task():
 
                 # 3. Аеропорти та Чартери (Раз на 6 годин: 0, 6, 12, 18)
                 if current_hour % 6 == 0:
-                    print("🌍 Прийшов час оновлювати аеропорти (6-годинний цикл)!")
-                    charter_results = None
-                    demand_content = await fetch_demand_data(session)
-                    if demand_content:
-                        files_to_push[GITHUB_FILE_PATH] = demand_content
-                        
-                        # 🔥 ГЕНЕРУЄМО АНАЛІТИКУ ДО КОМІТУ 🔥
-                        charter_results = await run_analytics_pipeline(session, demand_content=demand_content)
-                        if charter_results:
-                            files_to_push["newsky-charter-results.txt"] = charter_results
+                    SIX_HOUR_SYNC_RUNNING = True
+                    try:
+                        print("🌍 Прийшов час оновлювати аеропорти (6-годинний цикл)!")
+                        charter_results = None
+                        demand_content = await fetch_demand_data(session)
+                        if demand_content:
+                            files_to_push[GITHUB_FILE_PATH] = demand_content
+                            
+                            # 🔥 ГЕНЕРУЄМО АНАЛІТИКУ ДО КОМІТУ 🔥
+                            charter_results = await run_analytics_pipeline(session, demand_content=demand_content)
+                            if charter_results:
+                                files_to_push["newsky-charter-results.txt"] = charter_results
 
-                    # Top-pool + guaranteed bonus awards (same 6-hour cycle).
-                    # Передаємо свіжий charter_results напряму, щоб Node не читав
-                    # попередню версію з GitHub до фінального batch-коміту.
-                    top_bonus_files = await run_top_bonus_pipeline(session, charter_results=charter_results)
-                    if top_bonus_files:
-                        files_to_push.update(top_bonus_files)
+                        # Top-pool + guaranteed bonus awards (same 6-hour cycle).
+                        # Передаємо свіжий charter_results напряму, щоб Node не читав
+                        # попередню версію з GitHub до фінального batch-коміту.
+                        top_bonus_files = await run_top_bonus_pipeline(session, charter_results=charter_results)
+                        if top_bonus_files:
+                            files_to_push.update(top_bonus_files)
+                    finally:
+                        SIX_HOUR_SYNC_RUNNING = False
 
                 # 4. ФІНАЛЬНИЙ ПУШ ВСЬОГО ОДНИМ КОМІТОМ
                 if files_to_push:
@@ -6236,6 +6323,10 @@ async def on_ready():
     if not master_github_sync_task.is_running():
         master_github_sync_task.start()
         print("🤖 Master GitHub Sync Dispatcher started!")
+
+    if not guaranteed_bonus_dispatch_task.is_running():
+        guaranteed_bonus_dispatch_task.start()
+        print("🎯 Guaranteed Bonus workflow dispatcher started!")
 
     print(f"✅ Bot online: {client.user}")
     print("🚀 MONITORING STARTED")
