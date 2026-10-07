@@ -2987,7 +2987,7 @@ async def on_message(message):
                     return m.author == message.author and m.channel == message.channel and m.content.lower() in ['yes', 'no']
 
                 try:
-                    reply = await client.wait_for('message', check=check, timeout=180.0)
+                    reply = await client.wait_for('message', check=check, timeout=1800.0)
                     if reply.content.lower() == 'no':
                         return await status_msg.edit(content="❌ **Синхронізацію скасовано.**")
                 except asyncio.TimeoutError:
