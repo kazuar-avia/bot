@@ -6122,7 +6122,7 @@ async def push_to_github_batch(session, files_dict, commit_msg, max_retries=3):
     print("❌ Всі 3 спроби відправити дані на GitHub вичерпано. Рейс не записано.")
     return False
 
-# GUARANTEED BONUSES + PIES LEDGER: lightweight GitHub Actions dispatch every 10 minutes.
+# GUARANTEED BONUSES: lightweight GitHub Actions dispatch every 10 minutes.
 async def dispatch_guaranteed_bonus_workflow(session, max_retries=3):
     if not GITHUB_TOKEN:
         print("BONUS_DISPATCH_ERROR: missing GITHUB_TOKEN in Railway Variables")
@@ -6157,43 +6157,6 @@ async def dispatch_guaranteed_bonus_workflow(session, max_retries=3):
             await asyncio.sleep(2)
 
     print("BONUS_DISPATCH_ERROR: all workflow_dispatch attempts failed")
-    return False
-
-
-async def dispatch_pies_ledger_workflow(session, max_retries=3):
-    if not GITHUB_TOKEN:
-        print("PIES_DISPATCH_ERROR: missing GITHUB_TOKEN in Railway Variables")
-        return False
-
-    url = (
-        f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/"
-        "update-pies-ledger.yml/dispatches"
-    )
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with session.post(url, headers=headers, json={"ref": "main"}) as resp:
-                body = await resp.text()
-                if resp.status == 204:
-                    print("PIES_DISPATCH_OK: update-pies-ledger.yml dispatched")
-                    return True
-
-                print(
-                    f"PIES_DISPATCH_WARN: attempt {attempt}/{max_retries}, "
-                    f"HTTP {resp.status}: {body[:500]}"
-                )
-        except Exception as e:
-            print(f"PIES_DISPATCH_WARN: attempt {attempt}/{max_retries}: {e}")
-
-        if attempt < max_retries:
-            await asyncio.sleep(2)
-
-    print("PIES_DISPATCH_ERROR: all workflow_dispatch attempts failed")
     return False
 
 
@@ -6232,9 +6195,7 @@ async def guaranteed_bonus_dispatch_task():
         return
 
     async with aiohttp.ClientSession() as session:
-        # Trigger both lightweight GitHub Actions workflows in the same 10-minute slot.
         await dispatch_guaranteed_bonus_workflow(session)
-        await dispatch_pies_ledger_workflow(session)
 
 
 # ГОЛОВНИЙ ДИСПЕТЧЕР
