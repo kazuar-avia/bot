@@ -2972,7 +2972,7 @@ async def on_message(message):
                     else:
                         current_chunk += line
                 
-                current_chunk += "\n✍️ Напиши `yes` щоб підтвердити, або `no` щоб скасувати (маєш 180 секунд)."
+                current_chunk += "\n✍️ Напиши `yes` щоб підтвердити, `no` щоб скасувати, або `ignore` щоб додати всі ці рейси в `ignored.json` (маєш 180 секунд)."
                 chunks.append(current_chunk)
 
                 await status_msg.edit(content=chunks[0], suppress=True)
@@ -2984,12 +2984,42 @@ async def on_message(message):
                     extra_msgs.append(msg)
 
                 def check(m):
-                    return m.author == message.author and m.channel == message.channel and m.content.lower() in ['yes', 'no']
+                    return m.author == message.author and m.channel == message.channel and m.content.lower() in ['yes', 'no', 'ignore']
 
                 try:
                     reply = await client.wait_for('message', check=check, timeout=1800.0)
-                    if reply.content.lower() == 'no':
+                    choice = reply.content.lower()
+
+                    if choice == 'no':
                         return await status_msg.edit(content="❌ **Синхронізацію скасовано.**")
+
+                    if choice == 'ignore':
+                        # Перечитуємо ignored.json перед записом, щоб не затерти ID,
+                        # які могли додати іншою командою, поки !syncall чекав відповіді.
+                        ignored_list = load_ignored()
+                        ignored_set = {str(x) for x in ignored_list}
+                        added_count = 0
+
+                        for _, mf in missing_flights:
+                            raw_id = mf.get("_id") or mf.get("id")
+                            if not raw_id:
+                                continue
+
+                            fid = str(raw_id)
+                            if fid not in ignored_set:
+                                ignored_list.append(fid)
+                                ignored_set.add(fid)
+                                added_count += 1
+
+                        save_ignored(ignored_list)
+
+                        return await status_msg.edit(
+                            content=(
+                                f"🛑 **Ігнорування підтверджено.** "
+                                f"Додано **{added_count}** із **{len(missing_flights)}** запропонованих рейсів "
+                                f"у `ignored.json`. На GitHub нічого не додано."
+                            )
+                        )
                 except asyncio.TimeoutError:
                     return await status_msg.edit(content="⏳ **Час вийшов (180 сек).** Синхронізацію скасовано.")
                 finally:
