@@ -3581,7 +3581,7 @@ async def on_message(message):
                     files_to_push = {GITHUB_FILE_PATH: demand_content}
                     
                     # Отримуємо чартери локально ДО коміту
-                    charter_results = await run_analytics_pipeline(session, demand_content=demand_content, ctx=message.channel)
+                    charter_results = await run_analytics_pipeline(session, demand_content=demand_content, ctx=message.channel, files_to_push=files_to_push)
                     if charter_results:
                         files_to_push["newsky-charter-results.txt"] = charter_results
                         
@@ -6240,7 +6240,7 @@ async def master_github_sync_task():
                             files_to_push[GITHUB_FILE_PATH] = demand_content
                             
                             # 🔥 ГЕНЕРУЄМО АНАЛІТИКУ ДО КОМІТУ 🔥
-                            charter_results = await run_analytics_pipeline(session, demand_content=demand_content)
+                            charter_results = await run_analytics_pipeline(session, demand_content=demand_content, files_to_push=files_to_push)
                             if charter_results:
                                 files_to_push["newsky-charter-results.txt"] = charter_results
 
@@ -6268,7 +6268,7 @@ async def master_github_sync_task():
 # ANALYTICS PIPELINE: REPORT & CHARTERS
 # ==========================================
 
-async def run_analytics_pipeline(session, demand_content=None, ctx=None):
+async def run_analytics_pipeline(session, demand_content=None, ctx=None, files_to_push=None):
     if ctx: await ctx.send("⏳ Step 1: Preparing data and downloading scripts...")
 
     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.raw"}
@@ -6324,6 +6324,13 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None):
     # 4. Читаємо готовий результат
     with open("newsky-charter-results.txt", "r", encoding="utf-8") as f:
         final_text = f.read()
+
+    if files_to_push is not None:
+        report_file = Path("newsky-airports-report.txt")
+        if not report_file.is_file():
+            if ctx: await ctx.send("❌ File `newsky-airports-report.txt` was not created.")
+            return None
+        files_to_push["newsky-airports-report.txt"] = report_file.read_text(encoding="utf-8")
 
     # 5. Прибираємо всі тимчасові файли
     cleanup_files = scripts + ["newsky-airports.txt", "newsky-airports-report.txt", "newsky-charter-results.txt"]
