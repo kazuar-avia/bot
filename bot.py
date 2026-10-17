@@ -5990,6 +5990,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
 
         required_files = [
             "ADcoordinates.json",
+            "flight-block-time.js",
             "scripts/update-top-pool.js",
             "scripts/update-guaranteed-bonuses.js",
             "COMPANY/livery-matching.json",
