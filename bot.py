@@ -2797,31 +2797,61 @@ async def on_message(message):
             )
         return
 
-    # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
+    # --- COMMAND: !topsync (manual full 6-hour demand, analytics and TOP sync) ---
     if message.content.strip().lower() == "!topsync":
+        global SIX_HOUR_SYNC_RUNNING
         if not is_admin:
             return await message.channel.send("Access Denied")
 
-        status_msg = await message.channel.send("TOPSYNC: manual run started. Downloading GitHub files and building top pool...")
+        status_msg = await message.channel.send("TOPSYNC: manual full sync started. Fetching fresh NewSky demand...")
         try:
             async with GITHUB_DB_LOCK:
-                async with aiohttp.ClientSession() as session:
-                    files_to_push = await run_top_bonus_pipeline(session, ctx=message.channel)
-                    if files_to_push is None:
-                        return await status_msg.edit(content="ERROR: Top/Bonus Sync did not finish. Check the detailed message above and Railway logs.")
-                    if not files_to_push:
-                        return await status_msg.edit(content="OK: Top/Bonus Sync finished. No GitHub changes.")
+                SIX_HOUR_SYNC_RUNNING = True
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        demand_content = await fetch_demand_data(session)
+                        if not demand_content:
+                            return await status_msg.edit(content="ERROR: Could not fetch NewSky demand data. TOPSYNC stopped.")
 
-                    summary = "\n".join(f"- `{path}`" for path in files_to_push.keys())
-                    if len(summary) > 1500:
-                        summary = summary[:1500] + "\n- ..."
-                    await status_msg.edit(content=f"TOPSYNC: generated {len(files_to_push)} files:\n{summary}\n\nPushing one GitHub commit...")
+                        files_to_push = {GITHUB_FILE_PATH: demand_content}
+                        charter_results = await run_analytics_pipeline(
+                            session, demand_content=demand_content,
+                            ctx=message.channel, files_to_push=files_to_push
+                        )
+                        if not charter_results:
+                            return await status_msg.edit(content="ERROR: NewSky analytics failed. TOPSYNC stopped; nothing was pushed.")
 
-                    success = await push_to_github_batch(session, files_to_push, "Manual Top/Bonus Sync")
-                    if success:
-                        await status_msg.edit(content=f"OK: Top/Bonus Sync pushed to GitHub. Updated files: {len(files_to_push)}\n{summary}")
-                    else:
-                        await status_msg.edit(content="ERROR: Top/Bonus Sync generated files, but GitHub push failed. Check Railway logs.")
+                        files_to_push["newsky-charter-results.txt"] = charter_results
+                        top_bonus_files = await run_top_bonus_pipeline(
+                            session, ctx=message.channel, charter_results=charter_results
+                        )
+                        if top_bonus_files is None:
+                            return await status_msg.edit(content="ERROR: Top/Bonus Sync did not finish. Nothing was pushed. Check Railway logs.")
+                        files_to_push.update(top_bonus_files)
+
+                        summary = "\n".join(f"- `{file_path}`" for file_path in files_to_push.keys())
+                        if len(summary) > 1500:
+                            summary = summary[:1500] + "\n- ..."
+                        await status_msg.edit(content=f"TOPSYNC: generated {len(files_to_push)} files:\n{summary}\n\nPushing one GitHub commit...")
+
+                        success = await push_to_github_batch(session, files_to_push, "Manual Top/Bonus Sync")
+                        if success:
+                            await status_msg.edit(content=f"OK: Full TOPSYNC pushed to GitHub. Updated files: {len(files_to_push)}\n{summary}")
+                        else:
+                            await status_msg.edit(content="ERROR: TOPSYNC generated files, but GitHub push failed. Check Railway logs.")
+                finally:
+                    SIX_HOUR_SYNC_RUNNING = False
+                    for filename in (
+                        "newsky_report.py",
+                        "newsky_charter_with_tops_v4.py",
+                        "newsky-airports.txt",
+                        "newsky-airports-report.txt",
+                        "newsky-charter-results.txt",
+                    ):
+                        try:
+                            Path(filename).unlink(missing_ok=True)
+                        except OSError as cleanup_error:
+                            print(f"TOPSYNC_CLEANUP_WARN: {filename}: {cleanup_error}")
         except Exception as e:
             print(f"TOPSYNC_ERROR: {e}")
             await status_msg.edit(content=f"ERROR: Top/Bonus Sync exception: `{str(e)[:1500]}`")
