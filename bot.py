@@ -2851,14 +2851,7 @@ async def on_message(message):
                     async with session.put(url, headers=headers, json=body) as resp:
                         if resp.status not in (200, 201):
                             raise RuntimeError(f"GitHub не прийняв reroute (HTTP {resp.status}): {(await resp.text())[:350]}")
-                await status.edit(content=f"✅ Літак `{aircraft_id}` перенаправлено за рейсом `{flight_id}` → **{icao}**. Перераховую пропозиції...")
-                async with GITHUB_DB_LOCK:
-                    files = await run_top_bonus_pipeline(session, ctx=message.channel)
-                    if files is None:
-                        return await status.edit(content=f"✅ Reroute записаний → **{icao}**, але TOP Sync не завершився. Запусти `!topsync` пізніше.")
-                    if files and not await push_to_github_batch(session, files, f"Refresh TOP after reroute {aircraft_id}", require_all=True):
-                        return await status.edit(content=f"✅ Reroute записаний → **{icao}**, але оновлення TOP не вдалося записати. Запусти `!topsync` пізніше.")
-                await status.edit(content=f"✅ **REROUTE:** літак `{aircraft_id}`, рейс `{flight_id}` → **{icao}**. TOP-пропозиції перераховано.")
+                await status.edit(content=f"✅ **REROUTE:** літак `{aircraft_id}`, рейс `{flight_id}` → **{icao}**. Позицію збережено.")
         except Exception as error:
             logging.exception("REROUTE_ERROR")
             await status.edit(content=f"❌ Помилка reroute: `{str(error)[:500]}`")
