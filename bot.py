@@ -5990,6 +5990,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
 
         required_files = [
             "ADcoordinates.json",
+            "pilot-cabinet.html",
             "flight-block-time.js",
             "scripts/update-top-pool.js",
             "scripts/update-guaranteed-bonuses.js",
@@ -6313,6 +6314,19 @@ async def master_github_sync_task():
 
             except Exception as e:
                 print(f"❌ Помилка в Master Sync Task: {e}")
+            finally:
+                if current_hour % 6 == 0:
+                    for filename in (
+                        "newsky_report.py",
+                        "newsky_charter_with_tops_v4.py",
+                        "newsky-airports.txt",
+                        "newsky-airports-report.txt",
+                        "newsky-charter-results.txt",
+                    ):
+                        try:
+                            Path(filename).unlink(missing_ok=True)
+                        except OSError as cleanup_error:
+                            print(f"MASTER_SYNC_CLEANUP_WARN: {filename}: {cleanup_error}")
 
 # ==========================================
 # ANALYTICS PIPELINE: REPORT & CHARTERS
