@@ -2797,66 +2797,6 @@ async def on_message(message):
             )
         return
 
-    # --- ADMIN: !reroute <aircraft ID> <completed flight ID> ---
-    if message.content.strip().lower().split()[:1] == ["!reroute"]:
-        if not is_admin:
-            return await message.channel.send("🚫 **Access Denied**")
-        parts = message.content.split()
-        if len(parts) != 3 or not all(re.fullmatch(r"[a-fA-F0-9]{24}", value) for value in parts[1:]):
-            return await message.channel.send("⚠️ Формат: `!reroute <aircraft ID> <flight ID>`")
-        aircraft_id, flight_id = parts[1].lower(), parts[2].lower()
-        if not GITHUB_TOKEN:
-            return await message.channel.send("❌ GITHUB_TOKEN не налаштовано.")
-        status = await message.channel.send(f"⏳ Перевіряю рейс `{flight_id}` для літака `{aircraft_id}`...")
-        try:
-            async with aiohttp.ClientSession() as session:
-                details = await fetch_api(session, f"/flight/{flight_id}")
-                flight = details.get("flight") if isinstance(details, dict) else None
-                if not isinstance(flight, dict):
-                    return await status.edit(content="❌ Рейс не знайдено в NewSky API.")
-                real_aircraft = str((flight.get("aircraft") or {}).get("_id") or (flight.get("aircraft") or {}).get("id") or flight.get("aircraftId") or "").lower()
-                if real_aircraft != aircraft_id:
-                    return await status.edit(content=f"❌ Рейс належить іншому літаку: `{real_aircraft or 'невідомий'}`.")
-                close_time = flight.get("close") or flight.get("closed")
-                actual_arrival = flight.get("actArr") or flight.get("actualArrival") or {}
-                planned_arrival = flight.get("arr") or flight.get("arrival") or {}
-                icao = str((actual_arrival.get("icao") if isinstance(actual_arrival, dict) else actual_arrival) or
-                           (planned_arrival.get("icao") if isinstance(planned_arrival, dict) else planned_arrival) or "").strip().upper()
-                if not close_time or not re.fullmatch(r"[A-Z0-9]{4}", icao):
-                    return await status.edit(content="❌ Потрібен завершений рейс із відомим аеропортом прибуття.")
-                headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
-                remote_path = "COMPANY/aircraft-reroutes.json"
-                url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{remote_path}"
-                async with GITHUB_DB_LOCK:
-                    async with session.get(f"{url}?ref=main&t={int(time.time())}", headers=headers) as resp:
-                        if resp.status != 200:
-                            raise RuntimeError(f"Не вдалося прочитати overrides (HTTP {resp.status}).")
-                        meta = await resp.json()
-                    blob_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/blobs/{meta['sha']}"
-                    async with session.get(blob_url, headers=headers) as resp:
-                        if resp.status != 200:
-                            raise RuntimeError(f"Не вдалося прочитати override blob (HTTP {resp.status}).")
-                        blob = await resp.json()
-                    data = json.loads(base64.b64decode(blob["content"]).decode("utf-8"))
-                    if not isinstance(data.get("aircraft"), dict):
-                        data["aircraft"] = {}
-                    data["version"] = 1
-                    data["aircraft"][aircraft_id] = {
-                        "flightId": flight_id,
-                        "icao": icao,
-                        "updatedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                    }
-                    content = base64.b64encode((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")).decode("ascii")
-                    body = {"message": f"Set aircraft {aircraft_id} location from flight {flight_id}", "content": content, "sha": meta["sha"], "branch": "main"}
-                    async with session.put(url, headers=headers, json=body) as resp:
-                        if resp.status not in (200, 201):
-                            raise RuntimeError(f"GitHub не прийняв reroute (HTTP {resp.status}): {(await resp.text())[:350]}")
-                await status.edit(content=f"✅ **REROUTE:** літак `{aircraft_id}`, рейс `{flight_id}` → **{icao}**. Позицію збережено.")
-        except Exception as error:
-            logging.exception("REROUTE_ERROR")
-            await status.edit(content=f"❌ Помилка reroute: `{str(error)[:500]}`")
-        return
-
     # --- COMMAND: !topsync (manual top-pool + guaranteed bonus awards sync) ---
     if message.content.strip().lower() == "!topsync":
         if not is_admin:
@@ -5364,7 +5304,6 @@ async def on_message(message):
             desc += "**`!syncweek`** — Sync flights for current week\n"
             desc += "**`!updatedemand`** — Force GitHub demand update\n"
             desc += "**`!topsync`** — Force Top/Bonus Sync\n"
-            desc += "**`!reroute <aircraft ID> <flight ID>`** — Set effective aircraft location\n"
             desc += "**`!delflight <ID>`** — Remove specific flight from stats\n"
             desc += "**`!ban <ID> [reason]`** — Ban user on server\n"
             desc += "**`!unban <ID>`** — Unban user on server\n"
@@ -6055,8 +5994,6 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             "flight-block-time.js",
             "scripts/update-top-pool.js",
             "scripts/update-guaranteed-bonuses.js",
-            "scripts/aircraft-reroute.js",
-            "COMPANY/aircraft-reroutes.json",
             "COMPANY/livery-matching.json",
             "COMPANY/ucaa-livery-database.json",
             "COMPANY/guaranteed-bonuses.json",
