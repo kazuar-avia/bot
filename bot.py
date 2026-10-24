@@ -55,7 +55,12 @@ except Exception:
 STATE_FILE = Path("/app/data/sent.json")
 HIDDEN_FILE = Path("/app/data/hidden.json")
 STATUS_FILE = Path("/app/data/statuses.json")
-WEEKLY_STATS_FILE = Path("/app/data/weekly_stats.json")
+# Remove the obsolete local stats file from the persistent Railway volume.
+# This is safe to repeat on future restarts and does not touch flight archives.
+try:
+    Path("/app/data/weekly_stats.json").unlink(missing_ok=True)
+except OSError as exc:
+    print(f"⚠️ Unable to remove obsolete weekly stats file: {exc}")
 IGNORED_FILE = Path("/app/data/ignored.json")
 CHARTERS_FILE = Path("/app/data/charters.json")
 PROTECTED_CHANNEL_STATE_FILE = Path("/app/data/protected_channel.json")
@@ -1255,16 +1260,7 @@ async def ensure_protected_channel_warning(state=None):
         print(f"⚠️ Не вдалося створити/оновити попередження захищеного каналу: {e}")
         return None
 
-# 🔥 БЛОК ФУНКЦІЙ ДЛЯ СТАТИСТИКИ 🔥
-def load_weekly_stats():
-    if not WEEKLY_STATS_FILE.exists(): return {}
-    try: return json.loads(WEEKLY_STATS_FILE.read_text(encoding="utf-8"))
-    except: return {}
-
-def save_weekly_stats(stats):
-    try: WEEKLY_STATS_FILE.write_text(json.dumps(stats, indent=4), encoding="utf-8")
-    except: pass
-
+# --- ISO-week tag used by the independent GitHub FLIGHTS archive ---
 def get_iso_week(dt_str=None):
     if dt_str:
         try:
@@ -1275,303 +1271,6 @@ def get_iso_week(dt_str=None):
         dt = datetime.now(timezone.utc)
     y, w, _ = dt.isocalendar()
     return f"{y}-W{w:02d}"
-
-def get_week_dates_string(week_tag):
-    try:
-        y, w = map(int, week_tag.split("-W"))
-        first_day = datetime.strptime(f'{y}-W{w}-1', "%G-W%V-%u")
-        last_day = datetime.strptime(f'{y}-W{w}-7', "%G-W%V-%u")
-        return f"{first_day.strftime('%d.%m.%Y')} - {last_day.strftime('%d.%m.%Y')}"
-    except: return week_tag
-
-def init_week_stats():
-    return {
-        "flights": 0, "earnings": 0, "pax": 0, "cargo": 0,
-        "rating_sum": 0.0, "fpm_sum": 0, "g_sum": 0.0,
-        "pilots": {}, "airports": {}, "aircrafts": {},
-        "records": {
-            "butter": {"fpm": -99999, "g": 0.0, "pilot": "None"},
-            "hardest": {"fpm": 0, "g": 0.0, "pilot": "None"},
-            "longest": [],
-            "shortest": []
-        }
-    }
-
-def update_weekly_stats(f, week_tag):
-    stats = load_weekly_stats()
-    if week_tag not in stats:
-        stats[week_tag] = init_week_stats()
-        
-    s = stats[week_tag]
-    
-    t = f.get("result", {}).get("totals", {})
-    balance = int(t.get("balance", 0))
-    
-    raw_pax = t.get("payload", {}).get("pax", 0)
-    if raw_pax == 0 and f.get("type") != "cargo":
-        raw_pax = int(f.get("payload", {}).get("pax", 0))
-        
-    cargo_kg = int(f.get("payload", {}).get("weights", {}).get("cargo", 0))
-    rating = float(f.get("rating", 0.0))
-    ftime = int(t.get("time", 0))
-    
-    pilot = f.get("pilot", {}).get("fullname", "Unknown Pilot")
-    dep = f.get("dep", {}).get("icao", "???")
-    arr = f.get("arr", {}).get("icao", "???")
-    
-    ac_data = f.get("aircraft", {})
-    ac_icao = "Unknown"
-    if isinstance(ac_data, dict):
-        ac_icao = ac_data.get("icao") or ac_data.get("airframe", {}).get("icao") or "Unknown"
-    check_g, check_fpm = 0.0, 0
-    has_crash_title = False
-
-    if "result" in f and "violations" in f["result"]:
-        for v in f["result"]["violations"]:
-            if "Crashed on landing" in v.get("title", ""):
-                has_crash_title = True
-                
-            entry = v.get("entry", {}).get("payload", {}).get("touchDown", {})
-            if entry and check_g == 0.0:
-                check_g = float(entry.get("gForce", 0))
-                check_fpm = int(entry.get("rate", 0))
-
-    if check_g == 0 and "landing" in f:
-        check_g = float(f.get("landing", {}).get("gForce", 0))
-        check_fpm = int(f.get("landing", {}).get("rate", 0) or f.get("landing", {}).get("touchDownRate", 0))
-        
-    fpm_val = -abs(check_fpm) if check_fpm != 0 else 0
-    
-    is_hard_crash = abs(check_g) > 3.0 or abs(check_fpm) > 2000 or has_crash_title
-    
-    s["flights"] += 1
-    s["earnings"] += balance
-    s["pax"] += raw_pax
-    s["cargo"] += cargo_kg
-    s["rating_sum"] += rating
-    s["fpm_sum"] += fpm_val
-    s["g_sum"] += check_g
-    
-    s["pilots"][pilot] = s["pilots"].get(pilot, 0) + 1
-    s["airports"][dep] = s["airports"].get(dep, 0) + 1
-    s["airports"][arr] = s["airports"].get(arr, 0) + 1
-    
-    if "aircrafts" not in s: s["aircrafts"] = {}
-    if ac_icao != "Unknown":
-        s["aircrafts"][ac_icao] = s["aircrafts"].get(ac_icao, 0) + 1
-    
-    is_accelerated = False
-    accel_scalar = t.get("prices", {}).get("costScalars", {}).get("timeAcceleration", 1.0)
-    if accel_scalar < 1.0:
-        is_accelerated = True
-    elif "result" in f and "violations" in f["result"]:
-        for v in f["result"]["violations"]:
-            if "Time acceleration" in v.get("title", ""):
-                is_accelerated = True
-                break
-
-    # 1. Hardest Landing - приймаємо ВСЕ, навіть краші!
-    if fpm_val < s["records"]["hardest"]["fpm"]:
-        s["records"]["hardest"] = {"fpm": fpm_val, "g": check_g, "pilot": pilot}
-
-    # 2. Butter, Longest, Shortest - ТІЛЬКИ для безпечних (не крашів)
-    if not is_hard_crash:
-        if fpm_val < 0 and fpm_val > s["records"]["butter"]["fpm"]:
-            s["records"]["butter"] = {"fpm": fpm_val, "g": check_g, "pilot": pilot}
-            
-        if ftime > 0 and not is_accelerated:
-            flight_rec = {"time": ftime, "pilot": pilot, "dep": dep, "arr": arr}
-            
-            s["records"]["longest"].append(flight_rec)
-            s["records"]["longest"] = sorted(s["records"]["longest"], key=lambda x: x["time"], reverse=True)[:3]
-            
-            s["records"]["shortest"].append(flight_rec)
-            s["records"]["shortest"] = sorted(s["records"]["shortest"], key=lambda x: x["time"])[:3]
-            
-    save_weekly_stats(stats)
-
-async def check_and_publish_weekly_stats(channel, state, ongoing_ids):
-    stats = load_weekly_stats()
-    if not stats: return
-    
-    current_week = get_iso_week()
-    weeks_to_delete = []
-    
-    for week_tag, s in stats.items():
-        if week_tag >= current_week:
-            continue
-            
-        active_flight_exists = False
-        for fid, fstate in state.items():
-            if isinstance(fstate, dict) and not fstate.get("completed") and fstate.get("week") == week_tag:
-                if fid in ongoing_ids:
-                    active_flight_exists = True
-                    break
-                else:
-                    print(f"👻 Ігноруємо завислий рейс (привид): {fid}")
-                    
-        if not active_flight_exists:
-            try:
-                pinned_msgs = await channel.pins()
-                for p_msg in pinned_msgs:
-                    if p_msg.author == client.user and p_msg.embeds:
-                        if p_msg.embeds[0].title and "Weekly Summary" in p_msg.embeds[0].title:
-                            await p_msg.unpin()
-            except Exception as e:
-                print(f"Error unpinning old real report: {e}")
-
-            new_msg = await publish_weekly_embed(channel, week_tag, s)
-            
-            if new_msg:
-                try:
-                    await new_msg.pin()
-                except Exception as e:
-                    print(f"Error pinning message: {e}")
-
-            try:
-                owner = await client.fetch_user(ADMIN_IDS[0])
-                dates_str = get_week_dates_string(week_tag)
-                file_bin = io.BytesIO(json.dumps({week_tag: s}, indent=4).encode('utf-8'))
-                
-                await owner.send(
-                    content=f"📁 **Архів тижня: {week_tag}** ({dates_str})", 
-                    file=discord.File(file_bin, filename=f"weekly_stats_{week_tag}.json")
-                )
-            except Exception as e:
-                print(f"Error sending stats DM to admin: {e}")
-
-            weeks_to_delete.append(week_tag)
-            
-    if weeks_to_delete:
-        for w in weeks_to_delete:
-            del stats[w]
-        save_weekly_stats(stats)
-
-async def publish_weekly_embed(channel, week_tag, s):
-	# --- НАШ БЕЗПЕЧНИЙ ЛОКАЛЬНИЙ СЛОВНИК ДЛЯ СТАТИСТИКИ ---
-    manual_map = {'UK': 'UA', 'VH': 'HK'}
-    def get_report_flag(icao):
-        if not icao or icao == "???": return "🏳️"
-        country = AIRPORTS_DB.get(icao.upper(), {}).get("country", "XX")
-        if country == "XX" and len(icao) >= 2:
-            country = manual_map.get(icao[:2].upper(), "XX")
-        return get_flag(country)
-    # -----------------------------------------------------
-    dates_str = get_week_dates_string(week_tag)
-    fl = s["flights"]
-    if fl == 0: return None
-    
-    avg_rating = round(s["rating_sum"] / fl, 1)
-    avg_fpm = int(s["fpm_sum"] / fl)
-    avg_g = round(s["g_sum"] / fl, 2)
-    
-    medals = ["🥇", "🥈", "🥉"]
-    
-    # --- ТОП 3 ПІЛОТИ ---
-    sorted_pilots = sorted(s.get("pilots", {}).items(), key=lambda x: x[1], reverse=True)[:3]
-    pilots_str = ""
-    if not sorted_pilots:
-        pilots_str = "╰ None\n"
-    else:
-        for i, (p_name, p_flights) in enumerate(sorted_pilots):
-            pilots_str += f"╰ {medals[i]} **{p_name}** ({p_flights} flights)\n"
-            
-    # --- ТОП 3 АЕРОПОРТИ ---
-    sorted_apts = sorted(s.get("airports", {}).items(), key=lambda x: x[1], reverse=True)[:3]
-    apts_str = ""
-    if not sorted_apts:
-        apts_str = "╰ None\n"
-    else:
-        for i, (apt_icao, apt_ops) in enumerate(sorted_apts):
-            apt_flag = get_report_flag(apt_icao)
-            apts_str += f"╰ {medals[i]} {apt_flag} **{apt_icao}** ({apt_ops} ops)\n"
-            
-    # --- ТОП 3 ЛІТАКИ ---
-    sorted_acs = sorted(s.get("aircrafts", {}).items(), key=lambda x: x[1], reverse=True)[:3]
-    acs_str = ""
-    if not sorted_acs:
-        acs_str = "╰ None\n"
-    else:
-        for i, (ac_icao, ac_flights) in enumerate(sorted_acs):
-            acs_str += f"╰ {medals[i]} **{ac_icao}** ({ac_flights} flights)\n"
-            
-    rec = s["records"]
-    
-    def format_duration(minutes):
-        return f"{int(minutes // 60):02d} hrs {int(minutes % 60):02d} mins"
-
-    earn_val = s['earnings']
-    sign = "+" if earn_val >= 0 else "-" 
-    
-    # --- БЛОК ДЛЯ ТОП-3 НАЙДОВШИХ ---
-    longest_str = ""
-    if not rec['longest']:
-        longest_str = "╰ None\n"
-    else:
-        for i, r in enumerate(rec['longest']):
-            l_dep = r.get('dep', '???')
-            l_arr = r.get('arr', '???')
-            l_route = f" ({get_report_flag(l_dep)} {l_dep} ➔ {get_report_flag(l_arr)} {l_arr})" if l_dep != "???" else ""
-            longest_str += f"╰ {medals[i] if i < 3 else '🔹'} {format_duration(r['time'])} — **{r.get('pilot', 'Unknown')}**{l_route}\n"
-
-    # --- БЛОК ДЛЯ ТОП-3 НАЙКОРОТШИХ ---
-    shortest_str = ""
-    if not rec['shortest']:
-        shortest_str = "╰ None\n"
-    else:
-        for i, r in enumerate(rec['shortest']):
-            s_dep = r.get('dep', '???')
-            s_arr = r.get('arr', '???')
-            s_route = f" ({get_report_flag(s_dep)} {s_dep} ➔ {get_report_flag(s_arr)} {s_arr})" if s_dep != "???" else ""
-            shortest_str += f"╰ {medals[i] if i < 3 else '🔹'} {format_duration(r['time'])} — **{r.get('pilot', 'Unknown')}**{s_route}\n"
-    
-    desc = (
-        f"### 📈 General Statistics\n"
-        f"🛫 **Flights Completed:** {fl}\n"
-        f"💰 **Airline Earnings:** {sign}{abs(earn_val):,} $\n"
-        f"👫 **Passengers Carried:** {s['pax']:,} Pax\n"
-        f"📦 **Cargo Carried:** {s['cargo']:,} kg\n\n"
-        
-        f"### 🏆 Weekly Records\n"
-        f"👨‍✈️ **Most Active Pilots:**\n"
-        f"{pilots_str}\n"
-        
-        f"🧈 **Butter Landing:**\n"
-        f"╰ {rec['butter']['pilot']} ({rec['butter']['fpm']} fpm, {rec['butter']['g']} G)\n\n"
-        
-        f"🛬 **Hardest Landing:**\n"
-        f"╰ {rec['hardest']['pilot']} ({rec['hardest']['fpm']} fpm, {rec['hardest']['g']} G)\n\n"
-        
-        f"🐢 **Longest Flights:**\n"
-        f"{longest_str}\n"
-        
-        f"🚀 **Shortest Flights:**\n"
-        f"{shortest_str}\n"
-        
-        f"### ⭐ Company Averages\n"
-        f"📊 **Average Rating:** {avg_rating}\n"
-        f"📉 **Average FPM:** {avg_fpm} fpm | {avg_g} G\n\n"
-        
-        f"📍 **Most Popular Airports:**\n"
-        f"{apts_str}\n"
-        
-        f"✈️ **Most Popular Aircraft:**\n"
-        f"{acs_str.rstrip()}"
-    )
-    
-    embed = discord.Embed(
-        title=f"📊 Weekly Summary for {dates_str}",
-        description=desc,
-        color=0x3498db
-    )
-    
-    try: 
-        msg = await channel.send(embed=embed)
-        return msg 
-    except Exception as e: 
-        print(f"Error sending weekly embed: {e}")
-        return None
-# 🔥 КІНЕЦЬ БЛОКУ СТАТИСТИКИ 🔥
 
 # --- 🎭 СТАНДАРТНІ СТАТУСИ ---
 DEFAULT_STATUSES = [
@@ -2207,10 +1906,6 @@ async def process_completed_flight(fid, f, channel, state, wait_for_github=False
     reply_id = state.get(fid, {}).get("msg_id")
     await send_flight_message(channel, "Completed", f, "result", reply_to_id=reply_id)
 
-    # Статистика тижня — та сама логіка, що була в main_loop.
-    week_tag = state.get(fid, {}).get("week") or get_iso_week()
-    update_weekly_stats(f, week_tag)
-
     # GitHub — тиждень визначаємо за фактичним часом завершення рейсу.
     arrival_time = f.get("arrTimeAct") or f.get("close")
     target_week = get_iso_week(arrival_time)
@@ -2326,7 +2021,7 @@ async def on_interaction(interaction):
 
                 await interaction.followup.send(
                     f"✅ **Рейс `{cs}` (`{flight_id}`) примусово оброблено.** "
-                    "Звіт опубліковано, статистику оновлено, запис на GitHub виконано.",
+                    "Звіт опубліковано, запис на GitHub виконано.",
                     ephemeral=True
                 )
                 print(f"🔄 Force processed flight: {flight_id} ({cs})")
@@ -3402,111 +3097,7 @@ async def on_message(message):
         return
     # -------------------------------------------------------------
 	
-# --- 📥 КОМАНДА: !syncweek (СИНХРОНІЗАЦІЯ ЗА ЧАСОМ ЗАКРИТТЯ РЕЙСІВ) ---
-    if message.content.startswith("!syncweek"):
-        if not is_admin: 
-            return await message.channel.send("🚫 **Access Denied**")
-        
-        # 1. Читаємо кількість рейсів (за замовчуванням 100)
-        parts = message.content.split()
-        target_count = 100
-        if len(parts) > 1 and parts[1].isdigit():
-            target_count = int(parts[1])
-            
-        # 2. Визначаємо початок поточного тижня (Понеділок, 00:00:00 UTC)
-        now = datetime.now(timezone.utc)
-        monday = now - timedelta(days=now.weekday())
-        monday_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_iso = monday_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        current_week_tag = get_iso_week()
-        
-        status_msg = await message.channel.send(f"⏳ **Рахую рейси (ліміт: {target_count}) з початку тижня ({monday_start.strftime('%d.%m.%Y')})...**")
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                # --- НОВИЙ БЛОК ЗБОРУ РЕЙСІВ (ПАГІНАЦІЯ) ---
-                flights_list = []
-                skip_count = 0
-                
-                while len(flights_list) < target_count:
-                    request_count = min(100, target_count - len(flights_list))
-                    
-                    body = {
-                        "count": request_count, 
-                        "start": start_iso,
-                        "skip": skip_count
-                    }
-                    recent = await fetch_api(session, "/flights/recent", method="POST", body=body)
-                    
-                    if not recent or "results" not in recent:
-                        if skip_count == 0:
-                            return await status_msg.edit(content="❌ **Помилка:** Не вдалося отримати список рейсів від Newsky.")
-                        break
-                    
-                    batch = recent["results"]
-                    flights_list.extend(batch)
-                    
-                    if len(batch) < request_count:
-                        break
-                        
-                    skip_count += request_count
-                # ---------------------------------------------
-                
-                # --- СТАРА ЛОГІКА ОБРОБКИ (БЕЗ ЗМІН) ---
-                total_found = len(flights_list)
-                added_count = 0
-                
-                if total_found == 0:
-                    return await status_msg.edit(content="✅ **За цей тиждень ще немає завершених рейсів.**")
-                
-                # 🔥 МАГІЯ ТУТ: Сортуємо строго за часом ЗАКРИТТЯ рейсу (updatedAt)
-                # Від тих, що закрилися першими, до тих, що закрилися щойно.
-                # Це повністю імітує роботу живого бота!
-                flights_list.sort(key=lambda x: x.get("updatedAt", ""))
-                
-                await status_msg.edit(content=f"⏳ **Знайдено {total_found} рейсів. Додаю в порядку їх закриття...**")
-
-                ignored_list = load_ignored()
-                fid = "Невідомо"
-                for raw_f in flights_list:
-                    if raw_f.get("deleted") or not raw_f.get("close"):
-                        continue
-                        
-                    fid = str(raw_f.get("_id") or raw_f.get("id"))
-                    
-                    if fid in ignored_list:
-                        continue
-                    
-                    det = await fetch_api(session, f"/flight/{fid}")
-                    if not det or "flight" not in det: 
-                        continue
-                        
-                    f = det["flight"]
-                    t = f.get("result", {}).get("totals", {})
-                    
-                    if t.get("distance", 0) == 0 and t.get("time", 0) == 0:
-                        continue
-                        
-                    sched_time = f.get("depTime") or f.get("createdAt")
-                    week_tag = get_iso_week(sched_time)
-                    
-                    if week_tag != current_week_tag:
-                        continue
-                    
-                    update_weekly_stats(f, week_tag)
-                    added_count += 1
-                    
-                    if added_count % 5 == 0:
-                        await status_msg.edit(content=f"⏳ **Синхронізація: додано {added_count} / {total_found} рейсів...**")
-                        
-                await status_msg.edit(content=f"✅ **Синхронізація завершена!**\nДодано **{added_count}** рейсів у статистику так, якби бот був онлайн весь тиждень.")
-                
-        except Exception as e:
-            await status_msg.edit(content=f"❌ **Сталася помилка на рейсі {fid}:** {e}")
-        return
-    # -------------------------------------------------------------
-    
-    # --- 🧪 КОМАНДА: !testcharter (ПРОТЕСТУВАТИ ДИЗАЙН ЧАРТЕРУ - ТІЛЬКИ В ПП) ---
+# --- 🧪 КОМАНДА: !testcharter (ПРОТЕСТУВАТИ ДИЗАЙН ЧАРТЕРУ - ТІЛЬКИ В ПП) ---
     if message.content == "!testcharter":
         if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
@@ -3722,122 +3313,6 @@ async def on_message(message):
         return
     # -------------------------------------------------------------
 
-	# --- 🧪 КОМАНДА 1: !teststatspin (ЗІ ЗАКРІПЛЕННЯМ ТА ВІДКРІПЛЕННЯМ) ---
-    if message.content == "!teststatspin":
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        stats = load_weekly_stats()
-        if not stats: return await message.channel.send("⚠️ **Stats file is empty.**")
-        
-        await message.channel.send("🛠️ **Generating real report (WITH pins)...**")
-        try:
-            pinned_msgs = await message.channel.pins()
-            for p_msg in pinned_msgs:
-                if p_msg.author == client.user and p_msg.embeds and p_msg.embeds[0].title and "Weekly Summary" in p_msg.embeds[0].title:
-                    await p_msg.unpin()
-        except Exception as e:
-            print(f"Error unpinning: {e}")
-            
-        for week_tag, s in stats.items():
-            new_msg = await publish_weekly_embed(message.channel, week_tag, s)
-            if new_msg:
-                try: await new_msg.pin()
-                except Exception as e: print(f"Error pinning: {e}")
-        return
-
-    # --- 📌 КОМАНДА 2: !teststats (БЕЗ ЗАКРІПЛЕННЯ) ---
-    if message.content == "!teststats":
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        stats = load_weekly_stats()
-        if not stats: return await message.channel.send("⚠️ **Stats file is empty.**")
-        
-        await message.channel.send("🛠️ **Generating real report (NO pins)...**")
-        for week_tag, s in stats.items():
-            await publish_weekly_embed(message.channel, week_tag, s)
-        return
-
-    # --- 🤡 КОМАНДА 3: !teststatstest (ФЕЙКОВІ ДАНІ ДЛЯ ПРЕЗЕНТАЦІЇ) ---
-    if message.content == "!teststatstest":
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        
-        await message.channel.send("🛠️ **Generating presentation report (Randomized Fake Data)...**")
-        
-        # Рандомні базові значення
-        f_count = random.randint(80, 200)
-        
-        # Допоміжна функція для генерації випадкових рейсів (ТОП-3)
-        def gen_random_flights(time_min, time_max):
-            apts = ["UKBB", "UKLL", "UKOO", "UKLU", "EPWA", "LOWW", "KJFK", "LTFM", "EDDF"]
-            return [
-                {
-                    "time": random.randint(time_min, time_max),
-                    "pilot": f"Pilot {random.choice(['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo'])}",
-                    "dep": random.choice(apts),
-                    "arr": random.choice(apts)
-                } for _ in range(3)
-            ]
-
-        # Генеруємо красиві штучні дані
-        dummy_s = {
-            "flights": f_count, 
-            "earnings": f_count * random.randint(8000, 20000), 
-            "pax": f_count * random.randint(120, 250), 
-            "cargo": f_count * random.randint(1500, 5000),
-            
-            "rating_sum": f_count * random.uniform(9.0, 9.9), 
-            "fpm_sum": f_count * random.randint(-350, -150),    
-            "g_sum": f_count * random.uniform(1.05, 1.25),      
-            
-            "pilots": {f"Capt. {name}": random.randint(10, 40) for name in ["Shevchenko", "Kovalenko", "Boyko"]},
-            "airports": {apt: random.randint(15, 60) for apt in ["UKBB", "UKLL", "LOWW"]},
-            "aircrafts": {ac: random.randint(20, 70) for ac in ["B738", "A320", "B77W"]},
-            
-            "records": {
-                "butter": {"fpm": random.randint(-60, -10), "g": round(random.uniform(1.0, 1.05), 2), "pilot": "Capt. Silk"},
-                "hardest": {"fpm": random.randint(-800, -500), "g": round(random.uniform(1.6, 2.2), 2), "pilot": "Capt. Ryan"},
-                
-                # Рандомні списки для ТОП-3 (відсортовані)
-                "longest": sorted(gen_random_flights(400, 700), key=lambda x: x["time"], reverse=True),
-                "shortest": sorted(gen_random_flights(25, 60), key=lambda x: x["time"])
-            }
-        }
-        
-        current_week = get_iso_week()
-        await publish_weekly_embed(message.channel, current_week, dummy_s)
-        return
-
-    # --- 🧹 КОМАНДА: !clearstats (ОЧИСТИТИ ВСЮ СТАТИСТИКУ З ПЕРЕВІРКОЮ) ---
-    if message.content == "!clearstats":
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        
-        # Генеруємо два числа від 3 до 9
-        num1 = random.randint(3, 9)
-        num2 = random.randint(3, 9)
-        correct_answer = num1 * num2
-        
-        await message.channel.send(f"⚠️ **WARNING!** You are about to completely wipe all weekly statistics.\nTo confirm this action, please solve this math problem:\n**What is {num1} x {num2}?**\n*(Just type the number in the chat, you have 10 seconds)*")
-        
-        # Фільтр: бот прийме відповідь тільки від того, хто запустив команду, і тільки в цьому ж каналі
-        def check(m):
-            return m.author == message.author and m.channel == message.channel
-            
-        try:
-            # Бот чекає на повідомлення 10 секунд
-            reply = await client.wait_for('message', check=check, timeout=10.0)
-            
-            # Перевіряємо, чи зійшлася математика
-            if reply.content.strip() == str(correct_answer):
-                save_weekly_stats({})
-                await message.channel.send("🗑️ **Stats file (`weekly_stats.json`) completely wiped!**")
-            else:
-                await message.channel.send(f"❌ **Wrong answer (it should be {correct_answer}).** Protection triggered, deletion cancelled! 😅")
-                
-        except asyncio.TimeoutError:
-            # Якщо за 20 секунд ніхто нічого не написав
-            await message.channel.send("⏳ **Time's up.** Deletion operation cancelled.")
-            
-        return
-    # -------------------------------------------------------------
-
 	# --- 🛑 КОМАНДА: !ignore <ID> (ІГНОРУВАТИ БАГОВАНИЙ РЕЙС) ---
     if message.content.startswith("!ignore"):
         if not is_admin: return await message.channel.send("🚫 **Access Denied**")
@@ -3939,40 +3414,7 @@ async def on_message(message):
         return
 # -------------------------------------------------------------
 
-    # --- ➕ КОМАНДА: !addflight <ID> (ДОДАТИ ПРОПУЩЕНИЙ РЕЙС) ---
-    if message.content.startswith("!addflight"):
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        
-        parts = message.content.split()
-        if len(parts) < 2:
-            return await message.channel.send("⚠️ Usage: `!addflight <Flight_ID>`")
-        
-        fid = parts[1]
-        msg = await message.channel.send(f"⏳ **Searching for flight `{fid}` in Newsky DB...**")
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                det = await fetch_api(session, f"/flight/{fid}")
-                
-                if not det or "flight" not in det:
-                    return await msg.edit(content=f"❌ **Error:** Flight `{fid}` not found in API.")
-                
-                f = det["flight"]
-                
-                sched_time = f.get("depTimeSched") or f.get("creationDate")
-                week_tag = get_iso_week(sched_time)
-                
-                update_weekly_stats(f, week_tag)
-                
-                cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
-                await msg.edit(content=f"✅ **Flight `{cs}` successfully found and added to week `{week_tag}`!**")
-                
-        except Exception as e:
-            await msg.edit(content=f"❌ **Internal error occurred:** {e}")
-        return
-    # -------------------------------------------------------------
-
-	# --- 🗑️ КОМАНДА: !delghflight <ID> (ВИДАЛИТИ РЕЙС З GITHUB) ---
+    # --- 🗑️ КОМАНДА: !delghflight <ID> (ВИДАЛИТИ РЕЙС З GITHUB) ---
     if message.content.startswith("!delghflight"):
         if not is_admin: return await message.channel.send("🚫 **Access Denied**")
 
@@ -4114,102 +3556,7 @@ async def on_message(message):
         return
     # -------------------------------------------------------------
 
-	# --- ➖ КОМАНДА: !delflight <ID> (ВІДНЯТИ РЕЙС ЗІ СТАТИСТИКИ) ---
-    if message.content.startswith("!delflight"):
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        
-        parts = message.content.split()
-        if len(parts) < 2:
-            return await message.channel.send("⚠️ Usage: `!delflight <Flight_ID>`")
-        
-        fid = parts[1]
-        msg = await message.channel.send(f"⏳ **Removing flight `{fid}` from stats...**")
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                det = await fetch_api(session, f"/flight/{fid}")
-                
-                if not det or "flight" not in det:
-                    return await msg.edit(content=f"❌ **Error:** Flight `{fid}` not found in API.")
-                
-                f = det["flight"]
-                sched_time = f.get("depTimeSched") or f.get("creationDate")
-                week_tag = get_iso_week(sched_time)
-                
-                stats = load_weekly_stats()
-                if week_tag not in stats:
-                    return await msg.edit(content=f"⚠️ Week `{week_tag}` not found in stats.")
-                
-                s = stats[week_tag]
-                
-                t = f.get("result", {}).get("totals", {})
-                balance = int(t.get("balance", 0))
-                
-                raw_pax = t.get("payload", {}).get("pax", 0)
-                if raw_pax == 0 and f.get("type") != "cargo":
-                    raw_pax = int(f.get("payload", {}).get("pax", 0))
-                    
-                cargo_kg = int(f.get("payload", {}).get("weights", {}).get("cargo", 0))
-                rating = float(f.get("rating", 0.0))
-                
-                pilot = f.get("pilot", {}).get("fullname", "Unknown Pilot")
-                
-                check_g, check_fpm = 0.0, 0
-                if "result" in f and "violations" in f["result"]:
-                    for v in f["result"]["violations"]:
-                        entry = v.get("entry", {}).get("payload", {}).get("touchDown", {})
-                        if entry:
-                            check_g = float(entry.get("gForce", 0))
-                            check_fpm = int(entry.get("rate", 0))
-                            break 
-                if check_g == 0 and "landing" in f:
-                    check_g = float(f.get("landing", {}).get("gForce", 0))
-                    check_fpm = int(f.get("landing", {}).get("rate", 0) or f.get("landing", {}).get("touchDownRate", 0))
-                    
-                fpm_val = -abs(check_fpm) if check_fpm != 0 else 0
-                
-                if s["flights"] > 0:
-                    s["flights"] -= 1
-                    s["earnings"] -= balance
-                    s["pax"] -= raw_pax
-                    s["cargo"] -= cargo_kg
-                    s["rating_sum"] -= rating
-                    s["fpm_sum"] -= fpm_val
-                    s["g_sum"] -= check_g
-                
-                if pilot in s.get("pilots", {}):
-                    s["pilots"][pilot] -= 1
-                    if s["pilots"][pilot] <= 0: del s["pilots"][pilot]
-                
-                save_weekly_stats(stats)
-                
-                cs = f.get("flightNumber") or f.get("callsign") or "Unknown"
-                await msg.edit(content=f"✅ **Flight `{cs}` successfully REMOVED from week `{week_tag}`!**\n*(Note: Totals and averages are fixed. Weekly records like 'Hardest Landing' are not changed).*")
-                
-        except Exception as e:
-            await msg.edit(content=f"❌ **Internal error occurred:** {e}")
-        return
-    # -------------------------------------------------------------
-
-        # --- 📊 КОМАНДА: !stats (СКАЧАТИ ФАЙЛ СТАТИСТИКИ) ---
-    if message.content == "!stats":
-        if not is_admin: return await message.channel.send("🚫 **Access Denied**")
-        
-        try:
-            if not WEEKLY_STATS_FILE.exists() or os.path.getsize(WEEKLY_STATS_FILE) == 0:
-                return await message.channel.send("⚠️ **Stats file (weekly_stats.json) is empty or does not exist yet.**")
-                
-            with open(WEEKLY_STATS_FILE, "rb") as fp:
-                await message.channel.send(
-                    content="📊 **Weekly Stats File:**", 
-                    file=discord.File(fp, filename="weekly_stats.json")
-                )
-        except Exception as e:
-            await message.channel.send(f"❌ **Error sending file:** {e}")
-        return
-    # --------------------------------------------------------
-
-    # --- 📜 КОМАНДА: !audit [all/кількість] (СКАЧАТИ ЖУРНАЛ АУДИТУ) ---
+	# --- 📜 КОМАНДА: !audit [all/кількість] (СКАЧАТИ ЖУРНАЛ АУДИТУ) ---
     if message.content.startswith("!audit"):
         if not is_admin: return await message.channel.send("🚫 **Access Denied**")
         
@@ -5301,16 +4648,13 @@ async def on_message(message):
             desc += "**🔒 Admin Commands:**\n"
             desc += "**`!status`** — System status\n"
             desc += "**`!test [min]`** — Run test scenarios\n"
-            desc += "**`!syncweek`** — Sync flights for current week\n"
             desc += "**`!updatedemand`** — Force GitHub demand update\n"
             desc += "**`!topsync`** — Force Top/Bonus Sync\n"
-            desc += "**`!delflight <ID>`** — Remove specific flight from stats\n"
             desc += "**`!ban <ID> [reason]`** — Ban user on server\n"
             desc += "**`!unban <ID>`** — Unban user on server\n"
             desc += "**`!audit [all/num]`** — Download server audit log\n"
             desc += "**`!cache`** — Download bot memory (sent.json)\n"
             desc += "**`!spy <ID>`** — Dump raw flight JSON data\n"
-            desc += "**`!stats`** — Download weekly_stats.json\n"
             desc += "**`!banlist`** — Download banned users list\n"
             desc += "**`!disk`** — Show server disk/memory usage\n\n"
             
@@ -5323,11 +4667,6 @@ async def on_message(message):
             desc += "**`!unpin <ID>`** — Unpin a message\n"
             desc += "**`!wow <ID> <emoji>`** — Add reaction to a message\n"
             desc += "**`!unwow <ID> <emoji>`** — Remove reaction\n"
-            desc += "**`!teststatspin`** — Generate weekly report (PINS message)\n"
-            desc += "**`!teststats`** — Generate weekly report (NO pin)\n"
-            desc += "**`!teststatstest`** — Generate presentation report (Fake Data)\n"
-            desc += "**`!addflight <ID>`** — Force add missed flight to stats\n"
-            desc += "**`!clearstats`** — Wipe all weekly stats data\n"
             desc += "**`!idemoji <name>`** — Get code for a custom server emoji\n\n"
             
             desc += "**🎭 Status Management:**\n"
@@ -5468,19 +4807,20 @@ async def main_loop():
     
     channel = client.get_channel(CHANNEL_ID)
     state = load_state()
+    # Discard obsolete weekly tags from existing sent.json entries.
+    for flight_state in state.values():
+        if isinstance(flight_state, dict):
+            flight_state.pop("week", None)
     first_run = True
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                ongoing_ids = None
                 ongoing = await fetch_api(session, "/flights/ongoing")
                 if ongoing and "results" in ongoing:
-                    ongoing_ids = set()
                     print(f"📡 Tracking {len(ongoing['results'])} flights...", end='\r')
                     for raw_f in ongoing["results"]:
                         fid = str(raw_f.get("_id") or raw_f.get("id"))
-                        ongoing_ids.add(fid)
                         
                         state.setdefault(fid, {})
                         
@@ -5497,10 +4837,6 @@ async def main_loop():
                         if f.get("takeoffTimeAct") and not state[fid].get("takeoff"):
                             msg_id = await send_flight_message(channel, "Departed", f, "ongoing")
                             state[fid]["takeoff"] = True
-                            
-                            # 🔥 НОВЕ: Генерація мітки тижня під час зльоту 🔥
-                            sched_time = f.get("depTimeSched") or f.get("creationDate")
-                            state[fid]["week"] = get_iso_week(sched_time)
                             
                             if msg_id:
                                 state[fid]["msg_id"] = msg_id
@@ -5607,10 +4943,6 @@ async def main_loop():
                     first_run = False
 
                 save_state(state)
-                
-                # 🔥 ОНОВЛЕНИЙ ВИКЛИК: Передаємо список живих рейсів (ongoing_ids)
-                if ongoing_ids is not None:
-                    await check_and_publish_weekly_stats(channel, state, ongoing_ids)
                 
             except Exception as e: 
                 print(f"Loop Error: {e}")
