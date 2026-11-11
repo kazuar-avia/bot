@@ -8,6 +8,7 @@ import re
 import random
 import io
 import time
+import zipfile
 import shutil
 import base64
 import subprocess
@@ -1488,50 +1489,60 @@ GITHUB_DB_LOCK = asyncio.Lock()
 PROTECTED_CHANNEL_LOCK = asyncio.Lock()
 KEY_USAGE_HISTORY = {key: [] for key in NEWSKY_API_KEYS}
 
-async def fetch_api(session, path, method="GET", body=None):
+async def fetch_api(session, path, method="GET", body=None, diagnostics=None):
     global KEY_USAGE_HISTORY, API_LOCK
-    
+
     if API_LOCK is None:
         API_LOCK = asyncio.Lock()
-    
-    # 1. ШУКАЄМО ВІЛЬНИЙ КЛЮЧ
+
     async with API_LOCK:
         now = time.time()
-        
-        # Очищаємо історію від старих запитів для ВСІХ ключів (> 10 сек)
         for key in NEWSKY_API_KEYS:
             KEY_USAGE_HISTORY[key] = [t for t in KEY_USAGE_HISTORY[key] if now - t < 10.0]
-        
+
         selected_key = None
-        
-        # Проходимося по ключах ПО ЧЕРЗІ (спочатку головний, потім резервний)
         for key in NEWSKY_API_KEYS:
             if len(KEY_USAGE_HISTORY[key]) < 5:
                 selected_key = key
-                break # Знайшли ключ, у якого менше 5 запитів! Зупиняємо пошук.
-                
-        # Якщо ВСІ ключі зайняті (у всіх по 5 запитів)
+                break
+
         if selected_key is None:
-            # Знаходимо ключ, який звільниться найшвидше (у кого найстаріший запит)
             best_key_to_wait = min(NEWSKY_API_KEYS, key=lambda k: KEY_USAGE_HISTORY[k][0])
             oldest_request = KEY_USAGE_HISTORY[best_key_to_wait][0]
             wait_time = 10.0 - (now - oldest_request)
-            
+
             if wait_time > 0:
                 print(f"🚦 API Limit: Обидва ключі зайняті! Чекаємо {wait_time:.2f} сек... (Запит: {path})")
                 await asyncio.sleep(wait_time)
                 now = time.time()
-                
+
             selected_key = best_key_to_wait
-            
-        # Записуємо використання вибраного ключа
+
         KEY_USAGE_HISTORY[selected_key].append(now)
 
-    # 2. РОБИМО ЗАПИТ З ВИБРАНИМ КЛЮЧЕМ
     headers = {"Authorization": f"Bearer {selected_key}"}
-    
+    attempt = None
+    if diagnostics is not None:
+        attempt = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "method": method,
+            "url": f"{BASE_URL}{path}"
+        }
+    started = time.monotonic()
+
     try:
         async with session.request(method, f"{BASE_URL}{path}", headers=headers, json=body, timeout=10) as r:
+            if attempt is not None:
+                raw_body = await r.read()
+                attempt["http_status"] = r.status
+                attempt["content_type"] = r.headers.get("Content-Type")
+                attempt["retry_after"] = r.headers.get("Retry-After")
+                attempt["response_size_bytes"] = len(raw_body)
+                try:
+                    attempt["response_body"] = raw_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    attempt["response_body_base64"] = base64.b64encode(raw_body).decode("ascii")
+
             if r.status == 200:
                 return await r.json()
             elif r.status == 429:
@@ -1540,8 +1551,15 @@ async def fetch_api(session, path, method="GET", body=None):
             else:
                 return None
     except Exception as e:
+        if attempt is not None:
+            attempt["error"] = f"{type(e).__name__}: {e}"
         print(f"⚠️ API Error ({path}): {e}")
         return None
+    finally:
+        if attempt is not None:
+            attempt["duration_ms"] = round((time.monotonic() - started) * 1000)
+            diagnostics.append(attempt)
+
 
 # --- ✈️ ФОРМАТ АВІАКОМПАНІЇ / РЕЄСТРАЦІЇ ДЛЯ СПОВІЩЕНЬ ---
 def format_aircraft_operator_line(f):
@@ -1954,6 +1972,56 @@ async def on_interaction(interaction):
             return
         # ----------------------------------------------------------
 
+        if custom_id.startswith("ignore_flight_"):
+            flight_id = custom_id[len("ignore_flight_"):]
+            if interaction.user.id not in ADMIN_IDS:
+                await interaction.response.send_message("🚫 **Access Denied**", ephemeral=True)
+                return
+            if flight_id in FORCE_PROCESSING_FLIGHTS:
+                await interaction.response.send_message(
+                    "⏳ **Для цього рейсу вже виконується дія.**", ephemeral=True
+                )
+                return
+
+            FORCE_PROCESSING_FLIGHTS.add(flight_id)
+            await interaction.response.defer(ephemeral=True)
+            try:
+                ignored_list = load_ignored()
+                if flight_id not in ignored_list:
+                    ignored_list.append(flight_id)
+                    save_ignored(ignored_list)
+
+                if flight_id not in load_ignored():
+                    await interaction.followup.send(
+                        f"❌ Не вдалося записати рейс `{flight_id}` у ignored.json. Кнопки залишено.",
+                        ephemeral=True
+                    )
+                    return
+
+                try:
+                    await interaction.message.edit(view=None)
+                except Exception as e:
+                    print(f"⚠️ Не вдалося прибрати кнопки для {flight_id}: {e}")
+                    await interaction.followup.send(
+                        f"⚠️ Рейс `{flight_id}` додано в ignored.json, але кнопки не вдалося прибрати.",
+                        ephemeral=True
+                    )
+                    return
+
+                await interaction.followup.send(
+                    f"🛑 Рейс `{flight_id}` додано в ignored.json. Обробку заблоковано, кнопки прибрано.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"❌ Ignore flight error for {flight_id}: {e}")
+                await interaction.followup.send(
+                    f"❌ Не вдалося проігнорувати рейс `{flight_id}`: `{e}`",
+                    ephemeral=True
+                )
+            finally:
+                FORCE_PROCESSING_FLIGHTS.discard(flight_id)
+            return
+
         # --- 🔄 РУЧНИЙ BYPASS БАГОВАНОГО РЕЙСУ ---
         if custom_id.startswith("force_process_"):
             flight_id = custom_id[len("force_process_"):]
@@ -1961,6 +2029,17 @@ async def on_interaction(interaction):
             # Кнопка надсилається тільки адміну, але залишаємо явний захист по ID.
             if interaction.user.id not in ADMIN_IDS:
                 await interaction.response.send_message("🚫 **Access Denied**", ephemeral=True)
+                return
+
+            if flight_id in load_ignored():
+                await interaction.response.send_message(
+                    "🛑 **Цей рейс є в ignored.json, примусову обробку заблоковано.**",
+                    ephemeral=True
+                )
+                try:
+                    await interaction.message.edit(view=None)
+                except Exception:
+                    pass
                 return
 
             # Захист від подвійного кліку, поки перша обробка ще триває.
@@ -4843,8 +4922,11 @@ async def main_loop():
 
                 recent = await fetch_api(session, "/flights/recent", method="POST", body={"count": 5})
                 if recent and "results" in recent:
+                    ignored_flights = set(load_ignored())
                     for raw_f in recent["results"]:
                         fid = str(raw_f.get("_id") or raw_f.get("id"))
+                        if fid in ignored_flights:
+                            continue
                         if first_run:
                             state.setdefault(fid, {})["completed"] = True
                             continue
@@ -4852,23 +4934,43 @@ async def main_loop():
                         
                         # --- ЛОГІКА ДЛЯ ЗАКРИТИХ ТА ВИДАЛЕНИХ РЕЙСІВ ---
                         if raw_f.get("close"):
-                            det = await fetch_api(session, f"/flight/{fid}")
-                            
-                            # Універсальний аналізатор запобіжників
+                            api_attempts = []
+                            det = await fetch_api(session, f"/flight/{fid}", diagnostics=api_attempts)
+
                             def check_safeguards(api_data):
-                                if not api_data or "flight" not in api_data:
-                                    return "API повернуло порожню відповідь (немає даних про рейс)"
+                                if not isinstance(api_data, dict) or not isinstance(api_data.get("flight"), dict):
+                                    latest = api_attempts[-1] if api_attempts else {}
+                                    status = latest.get("http_status")
+                                    if status and status != 200:
+                                        return f"NewSky API відповіло HTTP {status}"
+                                    if latest.get("error"):
+                                        return f"Помилка API: {latest['error']}"
+                                    return "API не повернуло об'єкт flight"
+
                                 fl = api_data["flight"]
-                                totals = fl.get("result", {}).get("totals", {})
-                                d = totals.get("distance", 0)
-                                t_time = totals.get("time", 0)
+                                result = fl.get("result")
+                                totals = result.get("totals") if isinstance(result, dict) else None
+                                if not isinstance(totals, dict):
+                                    return "Відсутній об'єкт result.totals"
+
+                                missing = [key for key in ("distance", "time") if key not in totals]
+                                if missing:
+                                    return f"Відсутні поля result.totals: {', '.join(missing)}"
+
+                                d = totals["distance"]
+                                t_time = totals["time"]
+                                if d is None or t_time is None:
+                                    return f"Показники null (Дистанція: {d}, Час: {t_time})"
+                                if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in (d, t_time)):
+                                    return f"Некоректний тип показників (Дистанція: {d!r}, Час: {t_time!r})"
                                 if d == 0 and t_time == 0:
                                     return f"Нульові показники (Дистанція: {d} nm, Час: {t_time} min)"
+
                                 callsign = fl.get("flightNumber") or fl.get("callsign")
                                 if not callsign or callsign == "N/A":
                                     return "Відсутній позивний (Callsign = N/A)"
-                                return None # Якщо None - рейс ідеальний
-                                
+                                return None
+
                             reason = check_safeguards(det)
                             
                             if reason:
@@ -4877,7 +4979,7 @@ async def main_loop():
                                     await asyncio.sleep(3) # Чекаємо САМЕ 3 секунди
                                     
                                     # Робимо ТОЙ САМИЙ ЗАПИТ ще раз
-                                    det = await fetch_api(session, f"/flight/{fid}")
+                                    det = await fetch_api(session, f"/flight/{fid}", diagnostics=api_attempts)
                                     reason = check_safeguards(det)
                                     
                                     if not reason:
@@ -4900,15 +5002,50 @@ async def main_loop():
                                                 custom_id=f"force_process_{fid}"
                                             )
                                         )
+                                        bypass_view.add_item(
+                                            discord.ui.Button(
+                                                label="Не обробляти рейс",
+                                                emoji="🛑",
+                                                style=discord.ButtonStyle.danger,
+                                                custom_id=f"ignore_flight_{fid}"
+                                            )
+                                        )
 
-                                        await owner.send(
+                                        report = {
+                                            "flight_id": fid,
+                                            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+                                            "reason": reason,
+                                            "recent_flight": raw_f,
+                                            "api_requests": api_attempts
+                                        }
+                                        report_data = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+                                        report_filename = f"newsky_flight_{fid}.json"
+                                        if len(report_data) > 7 * 1024 * 1024:
+                                            buffer = io.BytesIO()
+                                            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                                                archive.writestr(report_filename, report_data)
+                                            report_data = buffer.getvalue()
+                                            report_filename = f"newsky_flight_{fid}.zip"
+
+                                        notification = (
                                             f"🙈 **Проігноровано багований рейс!**\n"
                                             f"🔗 **ID:** `{fid}`\n"
                                             f"🌐 [Відкрити рейс на Newsky](https://newsky.app/flight/{fid})\n"
                                             f"🛑 **Причина ігнору:** {reason}\n"
-                                            f"*(Дані не оновилися навіть після трьох спроб по 3 секунди)*",
-                                            view=bypass_view
+                                            f"*(Дані не оновилися навіть після трьох спроб по 3 секунди)*"
                                         )
+                                        try:
+                                            await owner.send(
+                                                notification,
+                                                view=bypass_view,
+                                                file=discord.File(io.BytesIO(report_data), filename=report_filename)
+                                            )
+                                        except discord.HTTPException as e:
+                                            print(f"⚠️ Не вдалося надіслати API-діагностику {fid}: {e}")
+                                            await owner.send(
+                                                notification + "\n⚠️ Не вдалося прикріпити повну діагностику API.",
+                                                view=bypass_view
+                                            )
                                     except Exception as e:
                                         print(f"Помилка відправки в ПП: {e}")
                                         
