@@ -1096,7 +1096,13 @@ def load_state():
 def save_state(state):
     try:
         if len(state) > 100: state = dict(list(state.items())[-50:])
-        STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        payload = json.dumps(state)
+        try:
+            if STATE_FILE.read_bytes() == payload.encode("utf-8"):
+                return
+        except OSError:
+            pass
+        STATE_FILE.write_text(payload, encoding="utf-8")
     except: pass
 
 def load_ignored():
