@@ -325,6 +325,43 @@ class RamRefreshView(discord.ui.View):
                 pass
 
 
+def create_volume_fill_file():
+    root = Path("/app/data").resolve()
+    mount = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or root).resolve()
+    if mount != root or not root.is_mount():
+        raise ValueError("Railway Volume не змонтовано в /app/data.")
+
+    target = root / "volume-fill.bin"
+    mib = 1024 * 1024
+    reserve = 10 * mib
+    headroom = 128 * 1024
+    chunk = bytes(mib)
+    written = 0
+    with target.open("xb") as output:
+        try:
+            remaining = shutil.disk_usage(root).free - reserve - headroom
+            if remaining <= 0:
+                raise ValueError("Недостатньо вільного місця для тестового файла.")
+            while remaining > 0:
+                free = shutil.disk_usage(root).free
+                size = min(len(chunk), remaining, free - reserve - headroom)
+                if size <= 0:
+                    break
+                output.write(chunk[:size])
+                written += size
+                remaining -= size
+            output.flush()
+            os.fsync(output.fileno())
+            free = shutil.disk_usage(root).free
+            if not written or free < reserve:
+                raise OSError("Не вдалося залишити щонайменше 10 МіБ вільними.")
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+
+    return written, free
+
+
 class VolumeFileSelect(discord.ui.Select):
     def __init__(self, manager):
         self.manager = manager
@@ -2552,6 +2589,24 @@ async def on_message(message):
         except Exception as e:
             print(f"RAM_COMMAND_ERROR: {e}")
             await message.channel.send(f"❌ Помилка RAM: `{str(e)[:1200]}`")
+        return
+
+    if message.content.strip().lower() == "!volfill":
+        if message.author.id not in ADMIN_IDS or not isinstance(message.channel, discord.DMChannel):
+            return await message.channel.send("🚫 Команда доступна власнику лише в ПП з ботом.")
+        status = await message.channel.send("⏳ Створюю `volume-fill.bin` у Volume…")
+        try:
+            written, free = await asyncio.to_thread(create_volume_fill_file)
+            mib = 1024 * 1024
+            result = (
+                f"✅ Створено `volume-fill.bin` ({written / mib:.2f} МіБ). "
+                f"Вільно: {free / mib:.2f} МіБ. Видалити файл можна через `!voldelete`."
+            )
+        except FileExistsError:
+            result = "⚠️ `volume-fill.bin` уже є. Для повтору видали його через `!voldelete`."
+        except (OSError, ValueError) as exc:
+            result = f"❌ Не вдалося заповнити Volume: `{exc}`"
+        await status.edit(content=result)
         return
 
     # --- 💾 КОМАНДА: !voldelete ---
