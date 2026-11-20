@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import logging
+import math
 import re
 import random
 import io
@@ -731,7 +732,48 @@ FORCE_PROCESSING_FLIGHTS = set()
 last_sent_message = None
 
 # ---------- ДОПОМІЖНІ ФУНКЦІЇ ----------
+def _landing_payload(f):
+    for violation in (f.get("result") or {}).get("violations") or []:
+        payload = (violation.get("entry") or {}).get("payload") or {}
+        touchdown = payload.get("touchDown")
+        if touchdown:
+            return payload, touchdown
+    return f.get("landing") or None, None
+
+
+def _landing_wind_components(wind_dir, wind_speed, heading):
+    if round(wind_dir) == 0 and wind_speed > 0:
+        wind_dir = 360.0
+
+    angle = math.radians(wind_dir - heading)
+    headwind = wind_speed * math.cos(angle)
+    crosswind = abs(wind_speed * math.sin(angle))
+    return wind_dir, headwind, int(round(crosswind)) if crosswind >= 1.0 else 0
+
+
+def _landing_wind_x_for_export(payload):
+    if not payload:
+        return None
+
+    weather = payload.get("weather")
+    location = payload.get("location")
+    if not isinstance(weather, dict) or not isinstance(location, dict):
+        return None
+
+    try:
+        wind_dir = float(weather.get("windDir"))
+        wind_speed = float(weather.get("windSpd"))
+        heading = float(location.get("hdg"))
+        if not all(math.isfinite(value) for value in (wind_dir, wind_speed, heading)) or wind_speed < 0:
+            return None
+        return _landing_wind_components(wind_dir, wind_speed, heading)[2]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def format_flight_for_db(f):
+    landing_payload, _ = _landing_payload(f)
+    landing_wind_x = _landing_wind_x_for_export(landing_payload)
     correctAircraftName = None
     if f.get("aircraft") and f["aircraft"].get("airframe") and f["aircraft"]["airframe"].get("name"):
         correctAircraftName = f["aircraft"]["airframe"]["name"]
@@ -824,7 +866,7 @@ def format_flight_for_db(f):
                     cleanV["entry"]["payload"]["weather"] = {
                         "windDir": w.get("windDir"),
                         "windSpd": w.get("windSpd"),
-                        "windX": w.get("windX")
+                        "windX": landing_wind_x if p is landing_payload and landing_wind_x is not None else w.get("windX")
                     }
 
             cleanFlight["result"]["violations"].append(cleanV)
@@ -840,7 +882,7 @@ def format_flight_for_db(f):
             cleanFlight["landing"]["weather"] = {
                 "windDir": w.get("windDir"),
                 "windSpd": w.get("windSpd"),
-                "windX": w.get("windX")
+                "windX": landing_wind_x if f["landing"] is landing_payload and landing_wind_x is not None else w.get("windX")
             }
             
     return cleanFlight
@@ -1458,8 +1500,6 @@ def get_rating_square(rating):
 
 # --- FPM + G-Force + Wind Search ---
 def get_landing_data(f, details_type):
-    import math
-    
     if details_type == "test":
         fpm = -random.randint(50, 400)
         g = round(random.uniform(0.9, 1.8), 2)
@@ -1469,22 +1509,14 @@ def get_landing_data(f, details_type):
     weather = {}
     hdg = 0.0
 
-    if "result" in f and "violations" in f["result"]:
-        for v in f["result"]["violations"]:
-            payload = v.get("entry", {}).get("payload", {})
-            td = payload.get("touchDown", {})
-            if td:
-                fpm = int(td.get("rate", 0))
-                g_force = float(td.get("gForce", 0))
-                weather = payload.get("weather", {})
-                hdg = float(payload.get("location", {}).get("hdg", 0)) if "location" in payload else 0.0
-                found = True
-                break
-
-    if not found and "landing" in f and f["landing"]:
-        payload = f["landing"]
-        fpm = int(payload.get("rate", 0) or payload.get("touchDownRate", 0))
-        g_force = float(payload.get("gForce", 0))
+    payload, touchdown = _landing_payload(f)
+    if payload:
+        if touchdown:
+            fpm = int(touchdown.get("rate", 0))
+            g_force = float(touchdown.get("gForce", 0))
+        else:
+            fpm = int(payload.get("rate", 0) or payload.get("touchDownRate", 0))
+            g_force = float(payload.get("gForce", 0))
         weather = payload.get("weather", {})
         hdg = float(payload.get("location", {}).get("hdg", 0)) if "location" in payload else 0.0
         found = True
@@ -1504,18 +1536,11 @@ def get_landing_data(f, details_type):
         if weather and "windDir" in weather:
             w_dir = float(weather.get("windDir", 0))
             w_spd = float(weather.get("windSpd", 0))
-            
-            if round(w_dir) == 0 and w_spd > 0: 
-                w_dir = 360.0
-                
+      
+            w_dir, headwind_raw, crosswind_kt = _landing_wind_components(w_dir, w_spd, hdg)
             comp = []
-            
-            angle_diff = math.radians(w_dir - hdg)
-            headwind_raw = w_spd * math.cos(angle_diff)
-            crosswind_raw = abs(w_spd * math.sin(angle_diff))
-            
-            if crosswind_raw >= 1.0:
-                comp.append(f"Crosswind: {int(round(crosswind_raw))} kt")
+            if crosswind_kt:
+                comp.append(f"Crosswind: {crosswind_kt} kt")
                 
             if headwind_raw <= -1.0:
                 comp.append(f"Tailwind: {int(round(abs(headwind_raw)))} kt")
