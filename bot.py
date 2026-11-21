@@ -1718,6 +1718,8 @@ async def send_flight_message(channel, status, f, details_type="ongoing", reply_
     ac = f.get("aircraft", {}).get("airframe", {}).get("name", "A/C")
     aircraft_operator_line = format_aircraft_operator_line(f)
     pilot = f.get("pilot", {}).get("fullname", "Pilot")
+    if pilot.strip() == "Kazuar Avia":
+        pilot += " <:boss:1520496612286398544>"
     
     raw_pax = 0
     if details_type == "result":
@@ -3799,16 +3801,23 @@ async def on_message(message):
         
         found_msg = None
         
-        for guild in client.guilds:
-            for channel in guild.text_channels:
+        guilds = [message.guild] if message.guild else client.guilds
+        for guild in guilds:
+            channels = list(guild.channels) + list(guild.threads)
+            for channel in channels:
+                if not hasattr(channel, "fetch_message"):
+                    continue
                 try:
+                    permissions = channel.permissions_for(guild.me)
+                    if not (permissions.view_channel and permissions.read_message_history):
+                        continue
                     found_msg = await channel.fetch_message(msg_id)
                     break
-                except:
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     continue
             if found_msg:
                 break
-                
+
         if found_msg:
             try:
                 await found_msg.delete()
@@ -4106,20 +4115,21 @@ async def on_message(message):
         if len(parts) < 2:
             return await message.channel.send("⚠️ Usage: `!idemoji <name>` (without colons)")
         
-        if not message.guild:
-            return await message.channel.send("⚠️ Please use this command in a server channel, not in DM.")
-
         emoji_name = parts[1].replace(":", "") # Прибираємо двокрапки, якщо випадково написав
-        
-        # Шукаємо емодзі на сервері
-        found_emoji = discord.utils.get(message.guild.emojis, name=emoji_name)
+
+        # У ПП шукаємо емодзі на серверах, доступних боту.
+        guilds = [message.guild] if message.guild else client.guilds
+        found_emoji = next(
+            (emoji for guild in guilds for emoji in guild.emojis if emoji.name == emoji_name),
+            None
+        )
         
         if found_emoji:
             # Формуємо правильний код (з 'a', якщо анімований)
             emoji_code = f"<{'a' if found_emoji.animated else ''}:{found_emoji.name}:{found_emoji.id}>"
             await message.channel.send(f"✅ **Found it!**\nCopy this code:\n`{emoji_code}`\n\nPreview: {emoji_code}")
         else:
-            await message.channel.send(f"❌ **Error:** Emoji named `{emoji_name}` not found on this server.")
+            await message.channel.send(f"❌ **Error:** Emoji named `{emoji_name}` not found on available servers.")
         return
     # -------------------------------------------------------------
 
