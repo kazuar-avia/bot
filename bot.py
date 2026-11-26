@@ -30,7 +30,7 @@ NEWSKY_API_KEY_ADD = os.getenv("NEWSKY_API_KEY_ADD")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 NEWSKY_SID = os.getenv("NEWSKY_SID")
 GITHUB_REPO = "kazuar-avia/kazuar-avia.github.io"
-GITHUB_FILE_PATH = "newsky-airports.txt"
+GITHUB_FILE_PATH = "data/newsky-airports.txt"
 
 # Формуємо список ключів (першим завжди йде головний!)
 NEWSKY_API_KEYS = []
@@ -3355,7 +3355,7 @@ async def on_message(message):
                     # Отримуємо чартери локально ДО коміту
                     charter_results = await run_analytics_pipeline(session, demand_content=demand_content, ctx=message.channel, files_to_push=files_to_push)
                     if charter_results:
-                        files_to_push["newsky-charter-results.txt"] = charter_results
+                        files_to_push["data/newsky-charter-results.txt"] = charter_results
                         
                     # Відправляємо обидва файли одним пушем
                     success = await push_to_github_batch(session, files_to_push, "🤖 Manual Demand & Tops Update")
@@ -5567,11 +5567,12 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             shutil.rmtree(workdir, ignore_errors=True)
         (workdir / "scripts").mkdir(parents=True, exist_ok=True)
         (workdir / "js").mkdir(parents=True, exist_ok=True)
+        (workdir / "data").mkdir(parents=True, exist_ok=True)
         (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
         (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
 
         required_files = [
-            "ADcoordinates.json",
+            "data/ADcoordinates.json",
             "pilot-cabinet.html",
             "js/flight-block-time.js",
             "scripts/update-top-pool.js",
@@ -5597,7 +5598,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
         support_root_files = [
             "js/aircraft-difficulty-coefficients.js",
             "js/pilot-pay-policy.js",
-            "newsky-charter-results.txt",
+            "data/newsky-charter-results.txt",
         ]
         for support_file in support_root_files:
             target = workdir / support_file
@@ -5606,7 +5607,7 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             # яка щойно була згенерована, але ще не встигла потрапити в GitHub commit.
             # Для ручного !topsync (charter_results=None) поведінка лишається стара:
             # беремо останню версію з GitHub, а потім з live-site fallback.
-            if support_file == "newsky-charter-results.txt" and charter_results is not None:
+            if support_file == "data/newsky-charter-results.txt" and charter_results is not None:
                 target.write_text(charter_results, encoding="utf-8")
                 print("TOPSYNC_INFO: using fresh in-memory newsky-charter-results.txt from current sync cycle.")
                 continue
@@ -5619,12 +5620,12 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
                         if resp.status == 200:
                             target.write_bytes(await resp.read())
                             print(f"TOPSYNC_INFO: {support_file} downloaded from live site fallback.")
-                        elif support_file != "newsky-charter-results.txt":
+                        elif support_file != "data/newsky-charter-results.txt":
                             return await fail_top_sync(f"{support_file} missing; live fallback HTTP {resp.status}")
                 except Exception as e:
-                    if support_file != "newsky-charter-results.txt":
+                    if support_file != "data/newsky-charter-results.txt":
                         return await fail_top_sync(f"{support_file} missing; live fallback error: {e}")
-            if support_file != "newsky-charter-results.txt" and not target.exists():
+            if support_file != "data/newsky-charter-results.txt" and not target.exists():
                 return await fail_top_sync(f"{support_file} missing before Node run")
 
         flights_count = await github_download_json_directory(session, "FLIGHTS", workdir / "FLIGHTS")
@@ -5875,7 +5876,7 @@ async def master_github_sync_task():
                             # 🔥 ГЕНЕРУЄМО АНАЛІТИКУ ДО КОМІТУ 🔥
                             charter_results = await run_analytics_pipeline(session, demand_content=demand_content, files_to_push=files_to_push)
                             if charter_results:
-                                files_to_push["newsky-charter-results.txt"] = charter_results
+                                files_to_push["data/newsky-charter-results.txt"] = charter_results
 
                         # Top-pool + guaranteed bonus awards (same 6-hour cycle).
                         # Передаємо свіжий charter_results напряму, щоб Node не читав
@@ -5926,7 +5927,7 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None, files_t
             f.write(demand_content)
     else:
         # Якщо даних немає (ручний запуск без оновлення), качаємо з гітхабу
-        async with session.get(f"{base_raw_url}/newsky-airports.txt", headers=gh_headers) as resp:
+        async with session.get(f"{base_raw_url}/{GITHUB_FILE_PATH}", headers=gh_headers) as resp:
             if resp.status == 200:
                 with open("newsky-airports.txt", "wb") as f:
                     f.write(await resp.read())
@@ -5976,7 +5977,7 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None, files_t
         if not report_file.is_file():
             if ctx: await ctx.send("❌ File `newsky-airports-report.txt` was not created.")
             return None
-        files_to_push["newsky-airports-report.txt"] = report_file.read_text(encoding="utf-8")
+        files_to_push["data/newsky-airports-report.txt"] = report_file.read_text(encoding="utf-8")
 
     # 5. Прибираємо всі тимчасові файли
     cleanup_files = scripts + ["newsky-airports.txt", "newsky-airports-report.txt", "newsky-charter-results.txt"]

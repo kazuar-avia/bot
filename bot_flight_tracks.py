@@ -200,7 +200,12 @@ def get_service():
     global _service
     if _service is None:
         site = HERE.parent/'kazuar-avia.github.io'
-        rules = Path(os.getenv('FLIGHT_TRACK_RULES_DIR',str(site if site.is_dir() else HERE/'flight_track_rules')))
+        site_data = site/'data'
+        rule_names = ('listofUKRaircompanies.txt', 'ruBanned.txt')
+        default_rules = next((p for p in (site_data, site, HERE/'flight_track_rules') if all((p/name).is_file() for name in rule_names)), HERE/'flight_track_rules')
+        rules = Path(os.getenv('FLIGHT_TRACK_RULES_DIR', str(default_rules)))
+        if not all((rules/name).is_file() for name in rule_names) and all((rules/'data'/name).is_file() for name in rule_names):
+            rules = rules/'data'
         db = Path(os.getenv('FLIGHT_TRACK_DB',str(HERE/'flight-tracks.local.sqlite3')))
         _service = Service(db,rules)
     return _service

@@ -201,7 +201,9 @@ def codes(path):
 
 async def collect_local(store, site, once=False):
     import aiohttp
-    airlines, banned = codes(site/'listofUKRaircompanies.txt'), codes(site/'ruBanned.txt')
+    rule_names = ('listofUKRaircompanies.txt', 'ruBanned.txt')
+    rules = next((p for p in (site/'data', site) if all((p/name).is_file() for name in rule_names)), site/'data')
+    airlines, banned = codes(rules/'listofUKRaircompanies.txt'), codes(rules/'ruBanned.txt')
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         while True:
             started = time.monotonic()
