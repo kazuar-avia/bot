@@ -12,6 +12,17 @@ HERE = Path(__file__).resolve().parent
 ORIGINS = frozenset({'https://kazuar.in.ua', 'https://www.kazuar.in.ua', 'http://localhost:8000', 'http://127.0.0.1:8000'})
 INTERVAL = 15
 
+class TrackAccessFilter(logging.Filter):
+    """Hide only routine GET responses for the flight history endpoint."""
+    def filter(self, record):
+        line = getattr(record, 'first_request_line', '')
+        parts = line.split() if isinstance(line, str) else []
+        return not (record.levelno == logging.INFO and len(parts) == 3 and
+                    parts[0] == 'GET' and parts[1].partition('?')[0] == '/api/flight-tracks' and
+                    getattr(record, 'response_status', None) in (200, 404))
+
+TRACK_ACCESS_FILTER = TrackAccessFilter()
+
 class Service:
     def __init__(self, db, rules, interval=INTERVAL):
         self.db = Path(db)
@@ -19,6 +30,12 @@ class Service:
         self.interval = interval
         self._store = None
         self.task = None
+        self._reported_sources = set()
+
+    def report_first_snapshot(self, source, count):
+        if source not in self._reported_sources:
+            self._reported_sources.add(source)
+            print(f"[Flight tracks] {source}: collector ready ({count} flights)", flush=True)
 
     def store(self):
         if self._store is None:
@@ -39,7 +56,7 @@ class Service:
             rows = rows_from_newsky(data)
             saved = self.store().ingest('newsky', rows)
             if saved:
-                LOG.info('NewSky: %s flights', len(rows))
+                self.report_first_snapshot('NewSky', len(rows))
             return saved
         except Exception as exc:
             LOG.warning('NewSky history skipped (%s)', type(exc).__name__)
@@ -55,7 +72,7 @@ class Service:
         rows = rows_from_vatsim(data, airlines, banned)
         saved = self.store().ingest('vatsim', rows, now=now, stamp=stamp)
         if saved:
-            LOG.info('VATSIM: %s flights', len(rows))
+            self.report_first_snapshot('VATSIM', len(rows))
         return saved
 
     async def run(self):
@@ -103,6 +120,7 @@ class Service:
 
     def mount(self, app):
         app.router.add_get('/api/flight-tracks', self.history)
+        logging.getLogger('aiohttp.access').addFilter(TRACK_ACCESS_FILTER)
 
     async def close(self):
         if self.task and not self.task.done():
