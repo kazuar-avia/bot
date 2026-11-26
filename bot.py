@@ -5566,13 +5566,14 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
         if workdir.exists():
             shutil.rmtree(workdir, ignore_errors=True)
         (workdir / "scripts").mkdir(parents=True, exist_ok=True)
+        (workdir / "js").mkdir(parents=True, exist_ok=True)
         (workdir / "COMPANY" / "TOP-POOLS").mkdir(parents=True, exist_ok=True)
         (workdir / "FLIGHTS").mkdir(parents=True, exist_ok=True)
 
         required_files = [
             "ADcoordinates.json",
             "pilot-cabinet.html",
-            "flight-block-time.js",
+            "js/flight-block-time.js",
             "scripts/update-top-pool.js",
             "scripts/update-guaranteed-bonuses.js",
             "COMPANY/livery-matching.json",
@@ -5594,8 +5595,8 @@ async def run_top_bonus_pipeline(session, ctx=None, charter_results=None):
             await github_download_file(session, remote_path, workdir / remote_path, required=False)
 
         support_root_files = [
-            "aircraft-difficulty-coefficients.js",
-            "pilot-pay-policy.js",
+            "js/aircraft-difficulty-coefficients.js",
+            "js/pilot-pay-policy.js",
             "newsky-charter-results.txt",
         ]
         for support_file in support_root_files:
