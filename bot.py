@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiohttp import web
 from discord.ext import tasks
+import bot_flight_tracks
 
 # ---------- НАЛАШТУВАННЯ ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -4992,6 +4993,7 @@ async def main_loop():
         while True:
             try:
                 ongoing = await fetch_api(session, "/flights/ongoing")
+                bot_flight_tracks.ingest_newsky(ongoing)
                 if ongoing and "results" in ongoing:
                     print(f"📡 Tracking {len(ongoing['results'])} flights...", end='\r')
                     for raw_f in ongoing["results"]:
@@ -5267,6 +5269,7 @@ async def newsky_webhook(request):
 async def start_web_server():
     app = web.Application()
     app.add_routes([web.post('/webhook', newsky_webhook)])
+    bot_flight_tracks.mount(app)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -5998,6 +6001,7 @@ async def on_ready():
     print("🚀 MONITORING STARTED")
     client.loop.create_task(status_loop())
     client.loop.create_task(main_loop())
+    bot_flight_tracks.start()
     client.loop.create_task(start_web_server())
 
 client.run(DISCORD_TOKEN)

@@ -1,0 +1,35 @@
+UKL	Ukraine Classic Air Alliance
+HKB	Ukraine Classic Air Alliance
+UCL	Ukraine Classic Air Alliance
+WRC	WIND ROSE
+AUI	Ukraine International
+PDA	Podillia Avia
+UKR	Air Ukraine
+UTN	SkyLine Express
+NPG	Supernova Airlines
+UBE	Bees Airlines
+SQP	SKYUP
+BAY	Bravo Airways
+SSV	Anda Air
+ANR	YanAir
+UKM	UMair
+KHK	Kharkiv Airlines
+ONX	Air Onix
+UDN	DNIEPROAVIA
+WAU	WIZZ AIR UKRAINE
+UDC	DonbassAero
+KHO	Khors Aircompany
+SIT	Aerosvit
+UZA	Constanta
+MSI	MOTOR SICH
+BKV	Bukovyna
+ILL	Illich-Avia
+OTL	SOUTH AIRLINES
+ODS	ODESSA AIRLINES
+UNR	Rivne Universal
+URG	AIR URGA
+CNH	Chernihiv Aero
+AEW	Aerosvit
+MXM Maximus Airlines
+AEL AeroTruck Logistics
+UKE Air Ukraine VA
