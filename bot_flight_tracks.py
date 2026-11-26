@@ -61,7 +61,7 @@ class Service:
             state = self.store().report()
             with tempfile.TemporaryDirectory(prefix='flight-audit-') as tmp:
                 parts = await asyncio.to_thread(self.audit.export, tmp, state)
-                await channel.send(f'Журнал аудиту: {len(parts)} ZIP-файл(ів). Містить події та поточний стан бази. Частини подано від найстарішої до найновішої.')
+                await channel.send(f'Журнал аудиту: {len(parts)} JSONL-файл(ів). Містить події та поточний стан бази. Частини подано від найстарішої до найновішої.')
                 for path in parts:
                     attachment = file_factory(str(path), filename=path.name)
                     try:

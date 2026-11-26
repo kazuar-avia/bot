@@ -4,7 +4,6 @@ import logging
 import shutil
 import threading
 import time
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,47 +58,72 @@ class Audit:
         return [self.path(i) for i in range(self.parts - 1, -1, -1) if self.path(i).is_file()]
 
     def export(self, output_dir, state):
-        """Capture complete existing log segments, oldest first. Each zip is <~5.1 MB."""
+        """Export chronological plain JSONL, splitting only at segment boundaries."""
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
+        limit = 7_500_000
         files = []
+        handles = []
         with self.lock:
-            handles = []
             try:
                 for path in self.files():
                     f = path.open('rb')
-                    handles.append((path.name, f, path.stat().st_size))
+                    handles.append((f, path.stat().st_size))
             except BaseException:
-                for _, f, _ in handles:
+                for f, _ in handles:
                     f.close()
                 raise
         try:
-            count = len(handles)
-            # Usually the whole journal compresses well enough for one Discord attachment.
-            combined = out / 'track-audit.zip'
-            with zipfile.ZipFile(combined, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-                for i, (name, f, size) in enumerate(handles, 1):
-                    z.writestr(f'{i:02d}-{name}', f.read(size))
-                    f.seek(0)
-                z.writestr('state.json', json.dumps(state, ensure_ascii=False, indent=2, default=str))
-            if combined.stat().st_size <= 7_500_000:
-                return [combined]
-            combined.unlink()
-            for i, (name, f, size) in enumerate(handles, 1):
-                # Linux preserves the opened file even if rotation renames/unlinks it.
-                target = out / f'track-audit-{i:02d}-of-{count:02d}.zip'
-                with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-                    z.writestr('events.jsonl', f.read(size))
-                    z.writestr('part.json', json.dumps({'part': i, 'parts': count, 'original_name': name, 'bytes': size}))
-                files.append(target)
-            # Keep the state separate so even a large report does not enlarge log parts.
-            target = out / 'track-audit-state.zip'
-            with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-                z.writestr('state.json', json.dumps(state, ensure_ascii=False, indent=2, default=str))
-            files.append(target)
+            state_line = (json.dumps({'event': 'export_state', 'state': state},
+                                     ensure_ascii=False, separators=(',', ':'), default=str) + '\n').encode('utf-8')
+            # Capture all complete records at the sizes observed under the lock.
+            # Rotation can rename files, but the open Linux handles remain valid.
+            batches = [[f, size] for f, size in handles]
+            if len(state_line) <= limit:
+                batches.append([None, len(state_line)])
+            used = 0
+            for f, size in batches:
+                if size > limit:
+                    raise ValueError('Audit segment exceeds attachment limit')
+                if not files or used + size > limit:
+                    files.append(out / f'track-audit-{len(files)+1:02d}.jsonl')
+                    used = 0
+                with files[-1].open('ab') as target:
+                    if f is None:
+                        target.write(state_line)
+                    else:
+                        remaining = size
+                        while remaining:
+                            data = f.read(min(remaining, 65536))
+                            if not data:
+                                raise OSError('Audit segment ended unexpectedly')
+                            target.write(data)
+                            remaining -= len(data)
+                used += size
+            if len(state_line) > limit:
+                # Avoid a giant attachment while preserving the state report.
+                state_fields = dict(state)
+                flights = state_fields.pop('flights', [])
+                records = [{'event': 'export_state', 'state': state_fields,
+                            'flight_count': len(flights)}]
+                records.extend({'event': 'export_state_flight', 'flight': row} for row in flights)
+                for record in records:
+                    line = (json.dumps(record, ensure_ascii=False, separators=(',', ':'), default=str) + '\n').encode('utf-8')
+                    if len(line) > limit:
+                        raise ValueError('Audit state record exceeds attachment limit')
+                    if not files or used + len(line) > limit:
+                        files.append(out / f'track-audit-{len(files)+1:02d}.jsonl')
+                        used = 0
+                    with files[-1].open('ab') as target:
+                        target.write(line)
+                    used += len(line)
+            if len(files) == 1:
+                target = out / 'track-audit.jsonl'
+                files[0].replace(target)
+                return [target]
             return files
         finally:
-            for _, f, _ in handles:
+            for f, _ in handles:
                 f.close()
 
 
