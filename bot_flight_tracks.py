@@ -9,7 +9,7 @@ from flight_tracker import TrackStore, rows_from_vatsim, rows_from_newsky, codes
 
 LOG = logging.getLogger('flight_tracks')
 HERE = Path(__file__).resolve().parent
-ORIGINS = frozenset({'https://kazuar.in.ua', 'https://www.kazuar.in.ua', 'http://localhost:8000', 'http://127.0.0.1:8000'})
+ORIGINS = frozenset({'https://kazuar.in.ua', 'https://www.kazuar.in.ua', 'https://kazuar-avia.github.io', 'http://localhost:8000', 'http://127.0.0.1:8000'})
 INTERVAL = 15
 
 class TrackAccessFilter(logging.Filter):
