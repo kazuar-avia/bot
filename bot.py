@@ -5937,7 +5937,7 @@ async def run_analytics_pipeline(session, demand_content=None, ctx=None, files_t
     # 2. Качаємо скрипти
     scripts = ["newsky_report.py", "newsky_charter_with_tops_v4.py"]
     for file_name in scripts:
-        async with session.get(f"{base_raw_url}/{file_name}", headers=gh_headers) as resp:
+        async with session.get(f"{base_raw_url}/scripts/{file_name}", headers=gh_headers) as resp:
             if resp.status == 200:
                 with open(file_name, "wb") as f:
                     f.write(await resp.read())
