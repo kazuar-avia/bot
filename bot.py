@@ -2603,19 +2603,6 @@ async def on_message(message):
                     pass
     
 
-    # Read-only flight database audit export, owner DM only.
-    if message.content.strip().lower() == "!tracklogs":
-        if message.author.id not in ADMIN_IDS or not isinstance(message.channel, discord.DMChannel):
-            return await message.channel.send("🚫 Команда доступна власнику лише в ПП з ботом.")
-        if not bot_flight_tracks.enabled():
-            return await message.channel.send("Збирач траєкторій вимкнено.")
-        try:
-            await bot_flight_tracks.get_service().send_audit(message.channel, discord.File)
-        except Exception as e:
-            logging.getLogger('flight_tracks').warning('Flight audit export failed (%s)', type(e).__name__)
-            await message.channel.send("Не вдалося експортувати журнал аудиту.")
-        return
-
     # --- 🧠 КОМАНДА: !ram ---
     if message.content.strip().lower() == "!ram":
         if not is_admin:
